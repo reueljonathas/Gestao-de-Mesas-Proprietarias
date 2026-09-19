@@ -9,15 +9,35 @@ from datetime import date, datetime
 # Configuração da página
 st.set_page_config(page_title="Gestão Profissional de Mesas CME", layout="wide", page_icon="🎯")
 
+# --- FUNÇÕES DE FORMATAÇÃO (PADRÃO BRASILEIRO) ---
+def fmt_moeda(valor):
+    """Formata números para o padrão $ 50.000,00"""
+    if valor is None or pd.isna(valor):
+        return "$ 0,00"
+    sinal = "-" if valor < 0 else ""
+    val_abs = abs(valor)
+    formatado = f"{val_abs:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{sinal}$ {formatado}"
+
+def fmt_data(data_str):
+    """Converte YYYY-MM-DD para DD/MM/AAAA"""
+    if not data_str or pd.isna(data_str):
+        return "-"
+    try:
+        return pd.to_datetime(data_str).strftime("%d/%m/%Y")
+    except:
+        return str(data_str)
+
 # --- CONEXÃO COM O BANCO DE DADOS ---
-conn = sqlite3.connect("mesas_v3.db", check_same_thread=False)
+conn = sqlite3.connect("mesas_v4.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Tabela de Contas
+# Tabela de Contas com campo 'trader'
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS contas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT,
+    trader TEXT,
     mesa TEXT,
     tamanho_conta TEXT,
     tipo TEXT,
@@ -45,9 +65,25 @@ CREATE TABLE IF NOT EXISTS trades (
     FOREIGN KEY(conta_id) REFERENCES contas(id)
 )
 """)
+
+# Tabelas para Ativos e Estratégias Customizadas
+cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
+cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
+
+# Inserir valores padrão caso estejam vazias
+cursor.execute("SELECT COUNT(*) FROM ativos")
+if cursor.fetchone()[0] == 0:
+    for a in ["NQ (Nasdaq)", "ES (S&P 500)", "YM (Dow)", "CL (Petróleo)", "GC (Ouro)", "RTY (Russell)"]:
+        cursor.execute("INSERT OR IGNORE INTO ativos (nome) VALUES (?)", (a,))
+
+cursor.execute("SELECT COUNT(*) FROM estrategias")
+if cursor.fetchone()[0] == 0:
+    for e in ["Rompimento", "Pullback / Tendência", "Reversão / VWAP", "Scalping", "Abertura / Notícia"]:
+        cursor.execute("INSERT OR IGNORE INTO estrategias (nome) VALUES (?)", (e,))
+
 conn.commit()
 
-# --- FUNÇÃO: PREGÕES ÚTEIS CME RESTANTES NO MÊS ---
+# --- PREGÕES ÚTEIS CME RESTANTES ---
 def dias_uteis_cme_restantes():
     hoje = date.today()
     _, ultimo_dia = calendar.monthrange(hoje.year, hoje.month)
@@ -60,53 +96,52 @@ def dias_uteis_cme_restantes():
 # Carregar dados
 contas_df = pd.read_sql("SELECT * FROM contas", conn)
 trades_df = pd.read_sql("SELECT * FROM trades", conn)
+ativos_df = pd.read_sql("SELECT nome FROM ativos ORDER BY nome ASC", conn)
+estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", conn)
 
 # Menu Lateral
 st.sidebar.title("Navegação")
 menu = st.sidebar.radio(
     "Ir para:",
-    ["📊 Painel Principal (Global & Individual)", "➕ Lançar Trade", "🛡️ Regras e Compliance", "⚙️ Gerenciar Contas"]
+    ["📊 Painel Principal (Global & Individual)", "➕ Lançar Trade", "🛡️ Regras e Compliance", "⚙️ Gerenciar Contas & Ativos"]
 )
 
 # =========================================================
-# 1. PAINEL PRINCIPAL (VISÃO GLOBAL OU INDIVIDUAL)
+# 1. PAINEL PRINCIPAL (GLOBAL OU INDIVIDUAL)
 # =========================================================
 if menu == "📊 Painel Principal (Global & Individual)":
     if contas_df.empty:
         st.title("📊 Painel Geral")
-        st.info("👋 Nenhuma conta cadastrada ainda. Acesse a aba **'⚙️ Gerenciar Contas'** para começar!")
+        st.info("👋 Nenhuma conta cadastrada ainda. Acesse **'⚙️ Gerenciar Contas & Ativos'** para começar!")
     else:
-        # Opção de alternar entre visão global ou individual
         opcoes_seletor = ["🌐 Visão Global (Todas as Contas)"] + [
-            f"{c['nome']} — {c['mesa']} ({c['tamanho_conta']})" for _, c in contas_df.iterrows()
+            f"{c['nome']} — {c['mesa']} ({c['tamanho_conta']}) | Trader: {c['trader']}" for _, c in contas_df.iterrows()
         ]
         
-        selecao = st.selectbox("Selecione o Modo de Visualização:", opcoes_seletor)
+        selecao = st.selectbox("Selecione a Visualização:", opcoes_seletor)
 
         # -------------------------------------------------
-        # MODO 1: VISÃO GLOBAL (CONSOLIDADO DE TODAS AS MESAS)
+        # VISÃO GLOBAL
         # -------------------------------------------------
         if selecao == "🌐 Visão Global (Todas as Contas)":
             st.title("🌐 Visão Consolidada de Todas as Contas")
             
-            # Cálculos Globais
             total_saldo_inicial = contas_df["saldo_inicial"].sum()
             total_lucro_global = trades_df["resultado"].sum() if not trades_df.empty else 0.0
             saldo_global_atual = total_saldo_inicial + total_lucro_global
             total_saques_global = contas_df["total_saques"].sum()
 
-            # Métricas Globais no Topo
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Resultado Líquido Global", f"${total_lucro_global:,.2f}", delta=f"{total_lucro_global:,.2f}")
-            col2.metric("Saldo Total sob Gestão", f"${saldo_global_atual:,.2f}")
-            col3.metric("Total em Saques Realizados", f"${total_saques_global:,.2f}")
-            col4.metric("Total de Contas Ativas", len(contas_df))
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Resultado Líquido Global", fmt_moeda(total_lucro_global))
+            c2.metric("Saldo Total sob Gestão", fmt_moeda(saldo_global_atual))
+            c3.metric("Total em Saques", fmt_moeda(total_saques_global))
+            c4.metric("Contas Ativas", len(contas_df))
 
             st.markdown("---")
 
-            # RADAR DAS 3 CONTAS PRIORITÁRIAS PARA HOJE
+            # RADAR TOP 3
             st.subheader("🎯 Radar Diário: Contas Recomendadas para Hoje (Máx 3)")
-            st.caption("Foco disciplinado: Evite inatividade de 7 dias e priorize contas com meta em aberto.")
+            st.caption("Foco disciplinado: Evite a inatividade de 7 dias e priorize contas que exigem performance.")
 
             hoje = date.today()
             dias_uteis = dias_uteis_cme_restantes()
@@ -125,15 +160,13 @@ if menu == "📊 Painel Principal (Global & Individual)":
                 lucro_conta = t_conta["resultado"].sum() if not t_conta.empty else 0.0
                 saldo_conta = c["saldo_inicial"] + lucro_conta
                 falta_meta = max(0.0, (c["saldo_inicial"] + c["meta"]) - saldo_conta)
-                meta_diaria = falta_meta / dias_uteis
+                mam = falta_meta / dias_uteis
 
-                # Pontuação de prioridade (Score)
                 score = 0
                 if dias_sem_operar >= 5:
                     score += 1500 + dias_sem_operar * 50
                 elif dias_sem_operar >= 3:
                     score += 400 + dias_sem_operar * 20
-                
                 if not operou_hoje:
                     score += 100
                 if falta_meta > 0 and c["meta"] > 0:
@@ -142,6 +175,7 @@ if menu == "📊 Painel Principal (Global & Individual)":
                 status_contas.append({
                     "id": c["id"],
                     "identificador": f"{c['nome']} ({c['mesa']})",
+                    "trader": c["trader"],
                     "mesa": c["mesa"],
                     "tamanho": c["tamanho_conta"],
                     "tipo": c["tipo"],
@@ -149,7 +183,7 @@ if menu == "📊 Painel Principal (Global & Individual)":
                     "saldo_atual": saldo_conta,
                     "pnl": lucro_conta,
                     "falta_meta": falta_meta,
-                    "meta_diaria": meta_diaria,
+                    "mam": mam,
                     "dias_sem_operar": dias_sem_operar,
                     "operou_hoje": operou_hoje,
                     "score": score
@@ -162,37 +196,41 @@ if menu == "📊 Painel Principal (Global & Individual)":
             if not criticas.empty:
                 for _, cr in criticas.iterrows():
                     dias_txt = "Nunca operada" if cr["dias_sem_operar"] == 99 else f"{cr['dias_sem_operar']} dias sem trade"
-                    st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** está a **{dias_txt}**! Opere-a hoje para não ser cancelada.")
+                    st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** (Trader: {cr['trader']}) está a **{dias_txt}**! Opere hoje para não quebrar a regra de inatividade.")
 
-            # Exibir as 3 contas recomendadas
+            # Exibição dos cards Top 3
             top3 = df_radar.head(3)
             cols = st.columns(3)
             for i, (_, row) in enumerate(top3.iterrows()):
                 with cols[i]:
                     titulo = "⭐ MÁXIMA ATENÇÃO: FOCO EM PERFORMANCE" if i == 0 else f"Opção #{i+1} do Dia"
                     st.markdown(f"#### {titulo}")
-                    st.info(f"**{row['identificador']}**\nTamanho: `{row['tamanho']}` | Tipo: `{row['tipo']}`")
+                    st.info(f"**{row['identificador']}**\n\n👤 Trader: `{row['trader']}` | Tam: `{row['tamanho']}`")
                     
                     d_txt = "Nunca" if row['dias_sem_operar'] == 99 else f"{row['dias_sem_operar']} dias atrás"
                     st.write(f"🕒 **Última Operação:** {d_txt}")
-                    st.metric("Saldo Atual", f"${row['saldo_atual']:,.2f}", delta=f"${row['pnl']:,.2f}")
-                    st.metric(f"Meta Diária CME ({dias_uteis} pregões)", f"${row['meta_diaria']:,.2f}/dia")
+                    st.metric("Saldo Atual", fmt_moeda(row['saldo_atual']), delta=fmt_moeda(row['pnl']))
+                    st.metric(f"MAM ({dias_uteis} pregões restantes)", f"{fmt_moeda(row['mam'])}/dia")
 
             st.markdown("---")
             st.subheader("📋 Tabela Consolidada de Contas")
+            
+            df_tabela = df_radar.copy()
+            df_tabela["Saldo Inicial"] = df_tabela["saldo_inicial"].apply(fmt_moeda)
+            df_tabela["Saldo Atual"] = df_tabela["saldo_atual"].apply(fmt_moeda)
+            df_tabela["P&L Total"] = df_tabela["pnl"].apply(fmt_moeda)
+            df_tabela["Falta p/ Meta"] = df_tabela["falta_meta"].apply(fmt_moeda)
+            df_tabela["MAM/Dia"] = df_tabela["mam"].apply(fmt_moeda)
+
             st.dataframe(
-                df_radar[["identificador", "mesa", "tamanho", "tipo", "saldo_inicial", "saldo_atual", "pnl", "falta_meta"]].rename(
-                    columns={
-                        "identificador": "Conta", "mesa": "Mesa", "tamanho": "Tamanho", "tipo": "Tipo",
-                        "saldo_inicial": "Saldo Inicial ($)", "saldo_atual": "Saldo Atual ($)",
-                        "pnl": "P&L Total ($)", "falta_meta": "Falta p/ Meta ($)"
-                    }
+                df_tabela[["identificador", "trader", "mesa", "tamanho", "tipo", "Saldo Inicial", "Saldo Atual", "P&L Total", "Falta p/ Meta", "MAM/Dia"]].rename(
+                    columns={"identificador": "Conta", "trader": "Trader Responsável", "mesa": "Mesa", "tamanho": "Tamanho", "tipo": "Tipo"}
                 ),
                 use_container_width=True
             )
 
         # -------------------------------------------------
-        # MODO 2: VISÃO INDIVIDUAL DA CONTA SELECIONADA
+        # VISÃO INDIVIDUAL
         # -------------------------------------------------
         else:
             idx_selecionado = opcoes_seletor.index(selecao) - 1
@@ -200,7 +238,7 @@ if menu == "📊 Painel Principal (Global & Individual)":
             c_id = int(c["id"])
 
             st.title(f"📈 {c['nome']} — {c['mesa']}")
-            st.caption(f"Tamanho: {c['tamanho_conta']} | Tipo: {c['tipo']} | Total Saques: ${c['total_saques']:,.2f}")
+            st.markdown(f"👤 **Trader Responsável:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Tipo:** `{c['tipo']}` | **Saques:** `{fmt_moeda(c['total_saques'])}`")
 
             t_conta = trades_df[trades_df["conta_id"] == c_id].copy()
             total_pnl = t_conta["resultado"].sum() if not t_conta.empty else 0.0
@@ -208,29 +246,37 @@ if menu == "📊 Painel Principal (Global & Individual)":
             drawdown_restante = saldo_atual - (c["saldo_inicial"] - c["max_dd"])
             falta_meta = max(0.0, (c["saldo_inicial"] + c["meta"]) - saldo_atual)
             dias_uteis = dias_uteis_cme_restantes()
+            mam_individual = falta_meta / dias_uteis
 
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Saldo Atual", f"${saldo_atual:,.2f}", delta=f"${total_pnl:,.2f}")
-            m2.metric("Margem até Stop da Mesa", f"${drawdown_restante:,.2f}")
-            m3.metric("Falta para o Alvo", f"${falta_meta:,.2f}")
-            m4.metric(f"Alvo/Dia ({dias_uteis} pregões CME)", f"${(falta_meta / dias_uteis):,.2f}")
+            m1.metric("Saldo Atual", fmt_moeda(saldo_atual), delta=fmt_moeda(total_pnl))
+            m2.metric("Margem até Stop da Mesa", fmt_moeda(drawdown_restante))
+            m3.metric("Falta para o Alvo", fmt_moeda(falta_meta))
+            m4.metric(f"MAM ({dias_uteis} pregões CME)", f"{fmt_moeda(mam_individual)}/dia", help="MAM: Meta Ajustada ao Mês dividida pelos pregões úteis restantes")
 
             st.markdown("---")
 
             if not t_conta.empty:
                 t_conta = t_conta.sort_values(by="id")
                 t_conta["Saldo_Acum"] = c["saldo_inicial"] + t_conta["resultado"].cumsum()
+                t_conta["data_formatada"] = t_conta["data"].apply(fmt_data)
 
-                fig = px.line(t_conta, x="data", y="Saldo_Acum", title="Curva de Patrimônio da Conta ($)", markers=True)
+                fig = px.line(t_conta, x="data_formatada", y="Saldo_Acum", title="Curva de Patrimônio ($)", markers=True)
                 st.plotly_chart(fig, use_container_width=True)
 
                 st.subheader("Histórico de Trades Desta Conta")
+                t_view = t_conta.copy()
+                t_view["Data"] = t_view["data"].apply(fmt_data)
+                t_view["Resultado"] = t_view["resultado"].apply(fmt_moeda)
+
                 st.dataframe(
-                    t_conta[["data", "ativo", "lotes", "resultado", "duracao_min", "estrategia", "notas"]].sort_values(by="data", ascending=False),
+                    t_view[["Data", "ativo", "lotes", "Resultado", "duracao_min", "estrategia", "notas"]].rename(
+                        columns={"ativo": "Ativo", "lotes": "Lotes", "duracao_min": "Duração (min)", "estrategia": "Estratégia", "notas": "Notas"}
+                    ).sort_values(by="Data", ascending=False),
                     use_container_width=True
                 )
                 csv = t_conta.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Baixar Trades Desta Conta (CSV)", csv, f"trades_{c['nome']}.csv", "text/csv")
+                st.download_button("📥 Baixar Histórico de Trades (CSV)", csv, f"trades_{c['nome']}.csv", "text/csv")
             else:
                 st.info("Nenhuma operação cadastrada para esta conta ainda.")
 
@@ -242,24 +288,27 @@ elif menu == "➕ Lançar Trade":
     if contas_df.empty:
         st.warning("Cadastre uma conta antes de lançar operações.")
     else:
-        lista_contas = [f"{c['id']} - {c['nome']} ({c['mesa']} | {c['tamanho_conta']})" for _, c in contas_df.iterrows()]
+        lista_contas = [f"{c['id']} - {c['nome']} ({c['mesa']} | {c['tamanho_conta']}) - Trader: {c['trader']}" for _, c in contas_df.iterrows()]
         conta_sel = st.selectbox("Selecione a Conta", lista_contas)
         c_id = int(conta_sel.split(" - ")[0])
+
+        lista_ativos = ativos_df["nome"].tolist()
+        lista_estrategias = estrategias_df["nome"].tolist()
 
         with st.form("form_trade"):
             c1, c2, c3 = st.columns(3)
             with c1:
-                data_trade = st.date_input("Data do Pregão", value=date.today())
-                ativo = st.selectbox("Ativo Operado (CME)", ["NQ (Nasdaq)", "ES (S&P 500)", "YM (Dow)", "CL (Petróleo)", "GC (Ouro)", "RTY (Russell)", "Outro"])
+                data_trade = st.date_input("Data do Pregão (DD/MM/AAAA)", value=date.today(), format="DD/MM/YYYY")
+                ativo = st.selectbox("Ativo Operado", lista_ativos)
             with c2:
                 lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=1.0, step=0.5)
-                resultado = st.number_input("Resultado Líquido ($)", value=0.0, step=25.0, help="Coloque sinal de menos (-) para perdas.")
+                resultado = st.number_input("Resultado Líquido ($) (use - para loss)", value=0.0, step=25.0)
             with c3:
                 duracao = st.number_input("Duração da Operação (Minutos)", min_value=1, value=15, step=1)
-                estrategia = st.selectbox("Estratégia", ["Rompimento", "Pullback / Tendência", "Reversão / VWAP", "Scalping", "Abertura / Notícia", "Outra"])
+                estrategia = st.selectbox("Estratégia", lista_estrategias)
 
-            notas = st.text_area("Observações (Gatilho, disciplina emocional, erros ou acertos)")
-            salvar = st.form_submit_button("Salvar Trade")
+            notas = st.text_area("Observações (Gatilho, disciplina, erros ou lições)")
+            salvar = st.form_submit_button("Salvar Operação")
             if salvar:
                 cursor.execute("""
                 INSERT INTO trades (conta_id, data, ativo, lotes, resultado, duracao_min, estrategia, notas)
@@ -276,7 +325,7 @@ elif menu == "🛡️ Regras e Compliance":
     if contas_df.empty:
         st.warning("Nenhuma conta encontrada.")
     else:
-        lista_contas = [f"{c['id']} - {c['nome']} ({c['mesa']})" for _, c in contas_df.iterrows()]
+        lista_contas = [f"{c['id']} - {c['nome']} ({c['mesa']}) | Trader: {c['trader']}" for _, c in contas_df.iterrows()]
         conta_sel = st.selectbox("Selecione a Conta para Auditoria:", lista_contas)
         c_id = int(conta_sel.split(" - ")[0])
         c_info = contas_df[contas_df["id"] == c_id].iloc[0]
@@ -287,13 +336,13 @@ elif menu == "🛡️ Regras e Compliance":
         else:
             t_janela = t_all.copy()
 
-        st.markdown(f"### Conta: `{c_info['nome']}` | Mesa: `{c_info['mesa']}` | Tipo: `{c_info['tipo']}`")
-        st.write(f"**Saques Totais Aprovados:** `${c_info['total_saques']:,.2f}`")
+        st.markdown(f"### Conta: `{c_info['nome']}` | Trader: `{c_info['trader']}` | Mesa: `{c_info['mesa']}` | Tipo: `{c_info['tipo']}`")
+        st.write(f"**Total Histórico em Saques:** `{fmt_moeda(c_info['total_saques'])}` | **Início da Janela:** `{fmt_data(c_info['data_inicio_janela'])}`")
 
         # REGRA 1: CONSISTÊNCIA DE SALDO
         st.subheader("1. Regra de Consistência de Saldo (Concentração Diária)")
         if c_info["tipo"] == "Challenge (Avaliação)":
-            st.info("ℹ️ A regra de consistência de saldo **NÃO** se aplica a contas em fase de Challenge.")
+            st.info("ℹ️ A regra de consistência de saldo NÃO se aplica a contas em avaliação (Challenge).")
         else:
             payouts = c_info["total_saques"]
             if c_info["tipo"] in ["Standard / Master", "No Activation"]:
@@ -302,15 +351,15 @@ elif menu == "🛡️ Regras e Compliance":
                 regra_pct = 0.30 if payouts <= 50000 else 0.20
 
             if t_janela.empty:
-                st.info("Nenhuma operação registrada na janela atual.")
+                st.info("Nenhuma operação nesta janela de saque.")
             else:
                 pnl_diario = t_janela.groupby("data")["resultado"].sum().reset_index()
                 lucro_total = pnl_diario["resultado"].sum()
                 maior_dia = pnl_diario["resultado"].max()
 
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Lucro Líquido na Janela", f"${lucro_total:,.2f}")
-                c2.metric("Maior Ganho em 1 Dia", f"${maior_dia:,.2f}")
+                c1.metric("Lucro Líquido na Janela", fmt_moeda(lucro_total))
+                c2.metric("Maior Ganho em 1 Dia", fmt_moeda(maior_dia))
                 c3.metric("Teto Permitido", f"{int(regra_pct*100)}%")
 
                 if lucro_total > 0 and maior_dia > 0:
@@ -318,10 +367,10 @@ elif menu == "🛡️ Regras e Compliance":
                     if rep > (regra_pct * 100):
                         lucro_necessario = maior_dia / regra_pct
                         falta_diluir = lucro_necessario - lucro_total
-                        st.error(f"❌ **VIOLAÇÃO DE CONSISTÊNCIA:** O maior dia foi {rep:.1f}% do total (Máx: {int(regra_pct*100)}%).")
-                        st.warning(f"💡 **Diluição Necessária:** Lucre mais **${falta_diluir:,.2f}** em outros dias para liberar seu saque dentro da regra.")
+                        st.error(f"❌ **VIOLAÇÃO DE CONSISTÊNCIA:** O maior dia representou {rep:.1f}% do lucro total (Teto: {int(regra_pct*100)}%).")
+                        st.warning(f"💡 **Diluição Necessária:** Você precisa lucrar mais **{fmt_moeda(falta_diluir)}** em outros pregões para diluir a concentração.")
                     else:
-                        st.success(f"✅ **REGRA APROVADA:** Melhor dia representou {rep:.1f}% do lucro total.")
+                        st.success(f"✅ **REGRA APROVADA:** Maior dia representou {rep:.1f}% do lucro líquido.")
 
         # REGRA 2: MEDIANA (5x)
         st.markdown("---")
@@ -337,14 +386,14 @@ elif menu == "🛡️ Regras e Compliance":
             maior_loss = abs(trades_loss.min()) if not trades_loss.empty else 0.0
 
             m1, m2, m3 = st.columns(3)
-            m1.metric("Mediana dos Ganhos", f"${mediana:,.2f}")
-            m2.metric("Stop Máximo Permitido (5x)", f"${teto_stop:,.2f}")
-            m3.metric("Maior Stop Realizado", f"${maior_loss:,.2f}")
+            m1.metric("Mediana dos Ganhos", fmt_moeda(mediana))
+            m2.metric("Stop Máximo Permitido (5x)", fmt_moeda(teto_stop))
+            m3.metric("Maior Stop Realizado", fmt_moeda(maior_loss))
 
             if maior_loss > teto_stop:
-                st.error(f"❌ **VIOLAÇÃO DA MEDIANA:** Perda de ${maior_loss:,.2f} ultrapassou o teto permitido de ${teto_stop:,.2f}.")
+                st.error(f"❌ **VIOLAÇÃO DA MEDIANA:** O stop de {fmt_moeda(maior_loss)} ultrapassou o teto permitido de {fmt_moeda(teto_stop)}.")
             else:
-                st.success("✅ **REGRA APROVADA:** Nenhuma perda ultrapassou 5x a mediana dos ganhos.")
+                st.success("✅ **REGRA APROVADA:** Nenhuma perda excedeu 5x a mediana dos ganhos.")
 
         # REGRA 3: CONSISTÊNCIA DE LOTES
         st.markdown("---")
@@ -362,18 +411,19 @@ elif menu == "🛡️ Regras e Compliance":
                 st.success("✅ **REGRA APROVADA:** Volume de contratos homogêneo.")
 
 # =========================================================
-# 4. GERENCIAR E EXCLUIR CONTAS
+# 4. GERENCIAR CONTAS, ATIVOS E ESTRATÉGIAS
 # =========================================================
-elif menu == "⚙️ Gerenciar Contas":
-    st.title("⚙️ Gerenciamento de Contas")
+elif menu == "⚙️ Gerenciar Contas & Ativos":
+    st.title("⚙️ Configurações e Gerenciamento")
 
-    # Formulário de Cadastro
+    # Cadastrar Nova Conta
     with st.expander("➕ Cadastrar Nova Conta de Mesa", expanded=True):
         with st.form("nova_conta"):
             c1, c2 = st.columns(2)
             with c1:
                 nome = st.text_input("Identificação da Conta (ex: Conta Principal, Apex 1)")
-                mesa = st.text_input("Nome da Mesa (ex: Ylos Trading, Mide Global, Apex, TradeDay)")
+                trader = st.text_input("Nome do Trader Responsável", value="Trader Principal")
+                mesa = st.text_input("Nome da Mesa (ex: Ylos Trading, Mide Global, Apex)")
                 tamanho_conta = st.selectbox("Tamanho da Conta", ["25k", "50k", "100k", "150k", "250k", "300k", "Outro"])
                 tipo = st.selectbox("Tipo de Conta", [
                     "Challenge (Avaliação)",
@@ -386,39 +436,67 @@ elif menu == "⚙️ Gerenciar Contas":
                 max_dd = st.number_input("Drawdown Máximo Permitido ($)", value=2500.0, step=100.0)
                 limite_diario = st.number_input("Limite Diário ($)", value=1000.0, step=100.0)
                 meta = st.number_input("Meta de Lucro ($)", value=3000.0, step=100.0)
-                total_saques = st.number_input("Total já sacado em todas as contas ($)", value=0.0, step=1000.0)
-                data_inicio = st.date_input("Início da Janela (Data de ativação ou último saque)", value=date.today())
+                total_saques = st.number_input("Total já sacado ($)", value=0.0, step=1000.0)
+                data_inicio = st.date_input("Início da Janela de Saque (DD/MM/AAAA)", value=date.today(), format="DD/MM/YYYY")
 
             salvar = st.form_submit_button("Cadastrar Conta")
             if salvar and nome and mesa:
                 cursor.execute("""
-                INSERT INTO contas (nome, mesa, tamanho_conta, tipo, saldo_inicial, max_dd, limite_diario, meta, total_saques, data_inicio_janela)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (nome, mesa, tamanho_conta, tipo, saldo_inicial, max_dd, limite_diario, meta, total_saques, str(data_inicio)))
+                INSERT INTO contas (nome, trader, mesa, tamanho_conta, tipo, saldo_inicial, max_dd, limite_diario, meta, total_saques, data_inicio_janela)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (nome, trader, mesa, tamanho_conta, tipo, saldo_inicial, max_dd, limite_diario, meta, total_saques, str(data_inicio)))
                 conn.commit()
-                st.success(f"Conta '{nome}' da mesa '{mesa}' cadastrada com sucesso!")
+                st.success(f"Conta '{nome}' cadastrada para o trader '{trader}'!")
                 st.rerun()
 
-    # Seção de Exclusão de Contas
+    # Personalizar Ativos e Estratégias
+    st.markdown("---")
+    st.subheader("🎯 Personalizar Ativos e Estratégias")
+    col_atv, col_est = st.columns(2)
+
+    with col_atv:
+        st.markdown("**Adicionar Novo Ativo**")
+        novo_ativo = st.text_input("Nome do Ativo (ex: 6E, ZB, BTC, Micro NQ)")
+        if st.button("➕ Adicionar Ativo"):
+            if novo_ativo:
+                try:
+                    cursor.execute("INSERT INTO ativos (nome) VALUES (?)", (novo_ativo.strip(),))
+                    conn.commit()
+                    st.success(f"Ativo '{novo_ativo}' adicionado!")
+                    st.rerun()
+                except:
+                    st.warning("Este ativo já existe.")
+        st.write("Ativos cadastrados:", ", ".join(ativos_df["nome"].tolist()))
+
+    with col_est:
+        st.markdown("**Adicionar Nova Estratégia**")
+        nova_est = st.text_input("Nome da Estratégia (ex: FVG, Order Block, Rompimento 15m)")
+        if st.button("➕ Adicionar Estratégia"):
+            if nova_est:
+                try:
+                    cursor.execute("INSERT INTO estrategias (nome) VALUES (?)", (nova_est.strip(),))
+                    conn.commit()
+                    st.success(f"Estratégia '{nova_est}' adicionada!")
+                    st.rerun()
+                except:
+                    st.warning("Esta estratégia já existe.")
+        st.write("Estratégias cadastradas:", ", ".join(estrategias_df["nome"].tolist()))
+
+    # Excluir Conta
     if not contas_df.empty:
         st.markdown("---")
         st.subheader("🗑️ Excluir Conta")
-        
-        lista_para_excluir = [f"{c['id']} - {c['nome']} ({c['mesa']} | {c['tamanho_conta']})" for _, c in contas_df.iterrows()]
-        conta_a_apagar = st.selectbox("Selecione a conta que deseja remover definitivamente:", lista_para_excluir)
+        lista_del = [f"{c['id']} - {c['nome']} ({c['mesa']}) | Trader: {c['trader']}" for _, c in contas_df.iterrows()]
+        conta_a_apagar = st.selectbox("Selecione a conta para apagar:", lista_del)
         id_apagar = int(conta_a_apagar.split(" - ")[0])
 
-        confirmar = st.checkbox("⚠️ Confirmo que desejo apagar esta conta e TODOS os seus trades registrados.")
+        confirmar = st.checkbox("⚠️ Confirmo que desejo apagar esta conta e todos os trades dela.")
         if st.button("Excluir Conta Definitivamente"):
             if confirmar:
                 cursor.execute("DELETE FROM trades WHERE conta_id = ?", (id_apagar,))
                 cursor.execute("DELETE FROM contas WHERE id = ?", (id_apagar,))
                 conn.commit()
-                st.success("Conta e histórico removidos com sucesso!")
+                st.success("Conta apagada com sucesso!")
                 st.rerun()
             else:
-                st.warning("Por favor, marque a caixinha de confirmação para poder excluir.")
-
-        st.markdown("---")
-        st.subheader("Contas Ativas")
-        st.dataframe(contas_df[["id", "nome", "mesa", "tamanho_conta", "tipo", "saldo_inicial", "meta", "total_saques"]], use_container_width=True)
+                st.warning("Marque a confirmação para excluir.")
