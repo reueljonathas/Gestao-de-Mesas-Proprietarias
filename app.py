@@ -94,6 +94,10 @@ def descompactar_duracao(dur_str):
         except: pass
     return h, m, s
 
+def duracao_em_segundos(dur_str):
+    h, m, s = descompactar_duracao(dur_str)
+    return h * 3600 + m * 60 + s
+
 def parse_display_duracao(val):
     if val is None or pd.isna(val):
         return "-"
@@ -176,7 +180,7 @@ CREATE TABLE IF NOT EXISTS saques (
 cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 
-# Verificação segura de colunas na tabela trades
+# Verificação segura de colunas
 cursor.execute("PRAGMA table_info(trades)")
 t_cols = [r[1] for r in cursor.fetchall()]
 if "direcao" not in t_cols:
@@ -214,7 +218,7 @@ saques_df = pd.read_sql("SELECT * FROM saques", conn)
 ativos_df = pd.read_sql("SELECT nome FROM ativos ORDER BY nome ASC", conn)
 estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", conn)
 
-# --- NAVEGAÇÃO LATERAL EM QUADRADOS (COM OPÇÃO BACKUP) ---
+# --- NAVEGAÇÃO LATERAL EM QUADRADOS ---
 if "menu" not in st.session_state:
     st.session_state.menu = "📊 Painel Geral"
 
@@ -568,7 +572,6 @@ elif menu == "📁 Minhas Contas":
                                 st.toast("Erro, e tente novamente", icon="❌")
                                 st.error("Esta estratégia já existe.")
 
-            # Processamento de Salvamento com Anti-Duplicação
             if btn_salvar:
                 try:
                     if not ativo:
@@ -587,7 +590,6 @@ elif menu == "📁 Minhas Contas":
                     cst_float = converter_br_para_float(custos_str)
                     duracao_formatada = formatar_duracao(dur_h, dur_m, dur_s)
 
-                    # Verificação Anti-Duplicação para Trades
                     cursor.execute("""
                     SELECT id FROM trades 
                     WHERE conta_id = ? AND data = ? AND ativo = ? AND lotes = ? AND resultado = ? AND direcao = ?
@@ -852,10 +854,12 @@ elif menu == "💰 Relatório Financeiro":
         st.plotly_chart(fig_bar, use_container_width=True)
 
 # =========================================================
-# 4. REGRAS E COMPLIANCE DA MESA
+# 4. REGRAS E COMPLIANCE DA MESA (MOTOR OFICIAL YLOS TRADING)
 # =========================================================
 elif menu == "🛡️ Regras e Compliance":
-    st.title("🛡️ Auditoria de Regras da Mesa")
+    st.title("🛡️ Auditoria de Regras & Compliance")
+    st.caption("Diagnóstico matemático oficial: status em tempo real e cálculo da solução caso alguma regra seja violada.")
+
     if contas_df.empty:
         st.warning("Nenhuma conta encontrada.")
     else:
@@ -864,92 +868,194 @@ elif menu == "🛡️ Regras e Compliance":
         c_id = int(conta_sel.split(" - ")[0])
         c_info = contas_df[contas_df["id"] == c_id].iloc[0]
 
+        mesa_nome = str(c_info["mesa"]).strip().lower()
+        is_ylos = "ylos" in mesa_nome
+        tipo_conta = str(c_info["tipo"]).strip()
+        status_conta = str(c_info["status"]).strip()
+
         t_all = trades_df[trades_df["conta_id"] == c_id].copy()
         if not t_all.empty and c_info["data_inicio_janela"]:
             t_janela = t_all[t_all["data"] >= c_info["data_inicio_janela"]].copy()
         else:
             t_janela = t_all.copy()
 
-        st.markdown(f"### Conta: `{c_info['nome']}` | Trader: `{c_info['trader']}` | Mesa: `{c_info['mesa']}` | Modelo: `{c_info['tipo']}` | Fase: `{c_info['status']}`")
-        st.write(f"**Total Histórico em Saques:** `{fmt_moeda(c_info['total_saques'])}` | **Início da Janela:** `{fmt_data(c_info['data_inicio_janela'])}`")
-
-        # REGRA 1: CONSISTÊNCIA DE SALDO
-        st.subheader("1. Regra de Consistência de Saldo (Concentração Diária)")
-        if c_info.get("status", "") == "Challenge (avaliação)":
-            st.info("ℹ️ A regra de consistência de saldo **NÃO** se aplica a contas na fase 'Challenge (avaliação)'.")
-        else:
-            payouts = c_info["total_saques"]
-            if c_info["tipo"] in ["Standard", "No Activation"]:
-                regra_pct = 0.40 if payouts <= 30000 else (0.30 if payouts <= 50000 else 0.20)
-            else:
-                regra_pct = 0.30 if payouts <= 50000 else 0.20
-
-            if t_janela.empty:
-                st.info("Nenhuma operação registrada na janela atual.")
-            else:
-                pnl_diario = t_janela.groupby("data")["resultado"].sum().reset_index()
-                lucro_total = pnl_diario["resultado"].sum()
-                maior_dia = pnl_diario["resultado"].max()
-
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Lucro Líquido na Janela", fmt_moeda(lucro_total))
-                c2.metric("Maior Ganho em 1 Dia", fmt_moeda(maior_dia))
-                c3.metric("Teto Permitido", f"{int(regra_pct*100)}%")
-
-                if lucro_total > 0 and maior_dia > 0:
-                    rep = (maior_dia / lucro_total) * 100
-                    if rep > (regra_pct * 100):
-                        lucro_necessario = maior_dia / regra_pct
-                        falta_diluir = lucro_necessario - lucro_total
-                        st.error(f"❌ **VIOLAÇÃO DE CONSISTÊNCIA:** O maior dia representou {rep:.1f}% do lucro total (Teto: {int(regra_pct*100)}%).")
-                        st.warning(f"💡 **Diluição Necessária:** Você precisa lucrar mais **{fmt_moeda(falta_diluir)}** em outros pregões para diluir a concentração.")
-                    else:
-                        st.success(f"✅ **REGRA APROVADA:** Maior dia representou {rep:.1f}% do lucro líquido.")
-
-        # REGRA 2: MEDIANA (5x)
+        st.markdown(f"### Conta: `{c_info['nome']}` | Mesa: `{c_info['mesa']}` | Modelo: `{tipo_conta}` | Fase: `{status_conta}`")
+        st.write(f"**Total em Saques:** `{fmt_moeda(c_info['total_saques'])}` | **Janela Atual Iniciada em:** `{fmt_data(c_info['data_inicio_janela'])}`")
         st.markdown("---")
-        st.subheader("2. Regra da Mediana das Operações Ganhadoras (Risco x Retorno)")
+
+        # -------------------------------------------------------------
+        # MOTOR 1: CONSISTÊNCIA DE SALDO (DIAGNÓSTICO E SOLUÇÃO EXATA)
+        # -------------------------------------------------------------
+        st.subheader("1. Consistência de Saldo (Limite de Lucro Diário)")
+        
+        if is_ylos and status_conta == "Challenge (avaliação)":
+            st.info("ℹ️ **Fase Challenge:** A regra de consistência de saldo não barra seu teste. No entanto, se você quiser aprovar mantendo o padrão de consistência, o cálculo abaixo mostra como diluir caso tenha concentrado o lucro.")
+
+        # Determinar percentual limite
+        if is_ylos:
+            payouts = c_info["total_saques"]
+            if tipo_conta in ["Freedom", "Freedom 2.0"]:
+                regra_pct = 0.30 if payouts <= 50000 else 0.20
+            elif tipo_conta in ["Standard", "No Activation"]:
+                regra_pct = 0.40 if payouts <= 30000 else (0.30 if payouts <= 50000 else 0.20)
+            else: # Instant Funded
+                regra_pct = 0.30 if payouts <= 50000 else 0.20
+        else:
+            regra_pct = 0.40
+
+        if t_janela.empty:
+            st.info("Nenhuma operação registrada na janela atual para cálculo de consistência.")
+        else:
+            pnl_diario = t_janela.groupby("data")["resultado"].sum().reset_index()
+            lucro_total_janela = pnl_diario["resultado"].sum()
+            maior_dia_lucro = pnl_diario["resultado"].max()
+
+            c_c1, c_c2, c_c3 = st.columns(3)
+            c_c1.metric("Lucro Líquido na Janela", fmt_moeda(lucro_total_janela))
+            c_c2.metric("Maior Ganho em 1 Único Dia", fmt_moeda(maior_dia_lucro))
+            c_c3.metric("Teto Permitido p/ 1 Dia", f"{int(regra_pct*100)}%")
+
+            if lucro_total_janela > 0 and maior_dia_lucro > 0:
+                representatividade = (maior_dia_lucro / lucro_total_janela) * 100
+                
+                if representatividade > (regra_pct * 100):
+                    # CÁLCULO DA SOLUÇÃO MATEMÁTICA DE DILUIÇÃO
+                    lucro_alvo_necessario = maior_dia_lucro / regra_pct
+                    falta_lucrar_diluicao = lucro_alvo_necessario - lucro_total_janela
+
+                    st.error(f"❌ **FORA DA REGRA:** O seu maior dia lucrou **{representatividade:.1f}%** do total acumulado (o teto permitido é de **{int(regra_pct*100)}%**).")
+                    
+                    st.warning(f"""
+                    💡 **SOLUÇÃO EXATA PARA REGULARIZAR SUA CONTA:**
+                    * Para que o ganho do seu melhor dia fique exatamente em **{int(regra_pct*100)}%**, seu lucro total na janela precisa alcançar **{fmt_moeda(lucro_alvo_necessario)}**.
+                    * **O que você deve fazer agora:** Você precisa lucrar mais **{fmt_moeda(falta_lucrar_diluicao)}** distribuídos em novos pregões. Ao bater esse valor extra, seu saque ou aprovação estará 100% liberado!
+                    """)
+                else:
+                    st.success(f"✅ **DENTRO DA REGRA:** Seu melhor dia representou **{representatividade:.1f}%** do lucro acumulado, respeitando com folga o limite de {int(regra_pct*100)}%.")
+            else:
+                st.info("A conta ainda não atingiu lucro líquido positivo acumulado nesta janela.")
+
+        st.markdown("---")
+
+        # -------------------------------------------------------------
+        # MOTOR 2: DIAS MÍNIMOS OPERADOS & DIAS VENCEDORES (>= $50)
+        # -------------------------------------------------------------
+        st.subheader("2. Critérios de Dias Operados e Dias Vencedores (Mínimo $50)")
+        
+        if t_janela.empty:
+            st.info("Sem dias operados nesta janela.")
+        else:
+            pnl_d = t_janela.groupby("data")["resultado"].sum().reset_index()
+            total_dias_operados = len(pnl_d)
+            dias_vencedores_50 = len(pnl_d[pnl_d["resultado"] >= 50.0])
+
+            # Exigências da Ylos por modalidade
+            if is_ylos:
+                if tipo_conta in ["Freedom", "Freedom 2.0"]:
+                    meta_dias_op = 10
+                    meta_dias_win = 10
+                else: # Standard, No Activation, Funded Master
+                    meta_dias_op = 10
+                    meta_dias_win = 7
+            else:
+                meta_dias_op = 5
+                meta_dias_win = 5
+
+            cd_1, cd_2, cd_3 = st.columns(3)
+            cd_1.metric("Dias Operados", f"{total_dias_operados} de {meta_dias_op}")
+            cd_2.metric("Dias c/ Ganho ≥ $50", f"{dias_vencedores_50} de {meta_dias_win}")
+            
+            faltam_dias_op = max(0, meta_dias_op - total_dias_operados)
+            faltam_dias_win = max(0, meta_dias_win - dias_vencedores_50)
+
+            if total_dias_operados >= meta_dias_op and dias_vencedores_50 >= meta_dias_win:
+                st.success("✅ **DENTRO DA REGRA:** Você já completou todos os dias mínimos operados e os dias vencedores de $50 necessários!")
+            else:
+                st.warning(f"""
+                ⏳ **CRITÉRIO PENDENTE PARA SAQUE / AVALIAÇÃO:**
+                * Faltam **{faltam_dias_op} dia(s)** operados para cumprir a meta mínima.
+                * Faltam **{faltam_dias_win} dia(s)** com ganho líquido de pelo menos **$ 50,00** para liberar a solicitação.
+                """)
+
+        st.markdown("---")
+
+        # -------------------------------------------------------------
+        # MOTOR 3: REGRA DA MEDIANA 5x (RISCO X RETORNO)
+        # -------------------------------------------------------------
+        st.subheader("3. Risco x Retorno (Regra da Mediana 5x)")
+        
         trades_gain = t_janela[t_janela["resultado"] > 0]["resultado"]
         trades_loss = t_janela[t_janela["resultado"] < 0]["resultado"]
 
         if trades_gain.empty:
-            st.info("Sem operações vencedoras para calcular a mediana.")
+            st.info("Sem operações vencedoras lançadas para calcular a mediana.")
         else:
-            mediana = float(np.median(trades_gain))
-            teto_stop = 5.0 * mediana
-            maior_loss = abs(trades_loss.min()) if not trades_loss.empty else 0.0
+            mediana_win = float(np.median(trades_gain))
+            teto_stop_max = 5.0 * mediana_win
+            maior_loss_unico = abs(trades_loss.min()) if not trades_loss.empty else 0.0
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Mediana dos Ganhos", fmt_moeda(mediana))
-            m2.metric("Stop Máximo Permitido (5x)", fmt_moeda(teto_stop))
-            m3.metric("Maior Stop Realizado", fmt_moeda(maior_loss))
+            cm_1, cm_2, cm_3 = st.columns(3)
+            cm_1.metric("Mediana dos Trades Ganhadores", fmt_moeda(mediana_win))
+            cm_2.metric("Prejuízo Máximo Permitido (5x)", fmt_moeda(teto_stop_max))
+            cm_3.metric("Maior Loss Realizado", fmt_moeda(maior_loss_unico))
 
-            if maior_loss > teto_stop:
-                st.error(f"❌ **VIOLAÇÃO DA MEDIANA:** O stop de {fmt_moeda(maior_loss)} ultrapassou o teto de 5x a mediana ({fmt_moeda(teto_stop)}).")
+            if maior_loss_unico > teto_stop_max:
+                st.error(f"❌ **FORA DA REGRA:** Você teve uma perda individual de **{fmt_moeda(maior_loss_unico)}**, ultrapassando o limite de 5x a mediana (**{fmt_moeda(teto_stop_max)}**).")
+                mediana_necessaria = maior_loss_unico / 5.0
+                st.warning(f"""
+                💡 **SOLUÇÃO PARA REEQUILIBRAR A MEDIANA:**
+                * Para que essa perda se torne aceitável dentro do limite de 5x, a mediana dos seus trades vencedores precisa subir para pelo menos **{fmt_moeda(mediana_necessaria)}**.
+                * **O que fazer:** Foque em operações vencedoras maiores ou com alvos mais longos para puxar a sua mediana para cima.
+                """)
             else:
-                st.success("✅ **REGRA APROVADA:** Nenhuma perda excedeu 5x a mediana dos ganhos.")
+                st.success(f"✅ **DENTRO DA REGRA:** Nenhuma perda única ultrapassou o teto permitido de 5x a mediana ({fmt_moeda(teto_stop_max)}).")
 
-        # REGRA 3: LOTES
         st.markdown("---")
-        st.subheader("3. Consistência de Volume de Contratos")
+
+        # -------------------------------------------------------------
+        # MOTOR 4: DETECTOR DE MICROSCALPING (< 30 SEGUNDOS)
+        # -------------------------------------------------------------
+        st.subheader("4. Estilo Operacional e Tempo de Operação (Regra Anti-Microscalping)")
+        
         if not t_janela.empty:
-            media_l = t_janela["lotes"].mean()
-            l1, l2 = st.columns(2)
-            l1.metric("Média de Lotes Operados", f"{media_l:.2f}")
-            l2.metric("Lote Máximo Registrado", f"{t_janela['lotes'].max():.2f}")
-            
-            discrepantes = t_janela[t_janela["lotes"] > (media_l * 2.5)]
-            if not discrepantes.empty:
-                st.warning(f"⚠️ **Atenção:** {len(discrepantes)} operações com lotes superiores a 2.5x a sua média.")
+            trades_rapidos = []
+            for _, tr in t_janela.iterrows():
+                seg = duracao_em_segundos(tr["duracao_min"])
+                if seg < 30 and seg > 0:
+                    trades_rapidos.append(tr)
+
+            if trades_rapidos:
+                st.error(f"❌ **ALERTA DE REGRA PROIBIDA (Microscalp):** Foram detectadas **{len(trades_rapidos)}** operações com menos de 30 segundos de duração. A Ylos proíbe operações com menos de 30s na maioria dos trades.")
+                st.caption("💡 **Solução:** Alongue o tempo de permanência nas operações para evitar que a mesa desqualifique seu histórico como arbitragem de liquidez.")
             else:
-                st.success("✅ **REGRA APROVADA:** Volume de contratos homogêneo.")
+                st.success("✅ **DENTRO DA REGRA:** Todas as suas operações duraram pelo menos 30 segundos, em conformidade com as diretrizes de scalping saudável da Ylos.")
+
+        # -------------------------------------------------------------
+        # MOTOR 5: MONITORAMENTO DE DRAWDOWN TRAILING vs EOD
+        # -------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("5. Monitoramento de Drawdown")
+        
+        if is_ylos and tipo_conta in ["Standard", "No Activation"] and status_conta in ["Funded (Financiada)", "Live (Real)"]:
+            # Regra da Trava do Trailing Ylos: Trava estático em Saldo Inicial + Drawdown + $100
+            trava_estatica = c_info["saldo_inicial"] + c_info["max_dd"] + 100.0
+            saldo_atual_conta = c_info["saldo_inicial"] + t_all["resultado"].sum() if not t_all.empty else c_info["saldo_inicial"]
+            
+            st.info(f"📌 **Tipo de Drawdown:** Trailing tick-a-tick. Trava definitivamente e vira estático ao atingir **{fmt_moeda(trava_estatica)}**.")
+            if saldo_atual_conta >= trava_estatica:
+                st.success(f"🔒 **DRAWDOWN TRAVADO:** Parabéns! Seu saldo atingiu a marca e seu limite de perda agora é estático.")
+            else:
+                falta_trava = trava_estatica - saldo_atual_conta
+                st.write(f"Faltam **{fmt_moeda(falta_trava)}** de lucro para travar o drawdown e torná-lo estático.")
+        else:
+            st.info("📌 **Tipo de Drawdown:** Ajustado ao final do dia (EOD). Seu saldo oficial é considerado no término do pregão.")
 
 # =========================================================
 # 5. BACKUP GERAL DE TODAS AS INFORMAÇÕES
 # =========================================================
 elif menu == "💾 Backup":
     st.title("💾 Backup Geral & Segurança dos Dados")
-    st.caption("Faça o download do backup consolidado de TODAS as suas contas, trades, saques e custos. Guarde esse arquivo no seu PC para nunca perder nenhuma informação.")
+    st.caption("Faça o download do backup consolidado de TODAS as suas contas, trades, saques e custos em um único arquivo.")
 
     col_bkg1, col_bkg2 = st.columns(2)
 
@@ -957,7 +1063,6 @@ elif menu == "💾 Backup":
         st.subheader("📥 Exportar Backup Completo")
         st.write("Gera uma cópia de segurança de todo o sistema (todas as contas juntas).")
         
-        # Consolidação de todas as tabelas em um único JSON
         dados_backup = {
             "contas": pd.read_sql("SELECT * FROM contas", conn).to_dict(orient="records"),
             "trades": pd.read_sql("SELECT * FROM trades", conn).to_dict(orient="records"),
