@@ -66,7 +66,6 @@ def converter_br_para_float(texto):
         return 0.0
 
 def extrair_ultimos_digitos(texto):
-    """Extrai os últimos dígitos do identificador da conta"""
     if not texto:
         return "----"
     nums = re.findall(r'\d+', str(texto))
@@ -215,7 +214,7 @@ CREATE TABLE IF NOT EXISTS saques (
 cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 
-# Migrações de segurança
+# Migração de colunas
 cursor.execute("PRAGMA table_info(contas)")
 c_cols = [r[1] for r in cursor.fetchall()]
 if "prazo_avaliacao" not in c_cols:
@@ -339,20 +338,25 @@ if menu == "📊 Painel Geral":
         st.markdown("---")
 
         st.subheader("🎯 Radar Diário: Contas Recomendadas para Hoje (Máx 3)")
-        st.caption("Organizadas lado a lado por ordem de criticidade: da mais prioritária para a menos crítica.")
+        st.caption("Fila Inteligente: Contas operadas hoje saem automaticamente do radar para você focar nas que ainda precisam de negociação.")
 
         hoje = date.today()
         status_contas = []
 
         for _, c in contas_df.iterrows():
             t_conta = trades_df[trades_df["conta_id"] == c["id"]]
+            
+            # Checagem se a conta já operou hoje
             if not t_conta.empty:
                 ult_data = datetime.strptime(t_conta["data"].max(), "%Y-%m-%d").date()
                 dias_sem_operar = (hoje - ult_data).days
-                operou_hoje = (ult_data == hoje)
+                t_hoje = t_conta[t_conta["data"] == str(hoje)]
+                operou_hoje = not t_hoje.empty
+                pnl_hoje = t_hoje["resultado"].sum() if operou_hoje else 0.0
             else:
                 dias_sem_operar = 99
                 operou_hoje = False
+                pnl_hoje = 0.0
 
             lucro_conta = t_conta["resultado"].sum() if not t_conta.empty else 0.0
             saldo_conta = c["saldo_inicial"] + lucro_conta
@@ -368,8 +372,6 @@ if menu == "📊 Painel Geral":
             if dias_expira is not None and dias_expira <= 7:
                 score += 2000
 
-            if not operou_hoje:
-                score += 100
             if falta_meta > 0 and c["meta"] > 0:
                 score += min(100, (lucro_conta / c["meta"]) * 100)
 
@@ -392,19 +394,20 @@ if menu == "📊 Painel Geral":
                 "dias_expira": dias_expira,
                 "dias_sem_operar": dias_sem_operar,
                 "operou_hoje": operou_hoje,
+                "pnl_hoje": pnl_hoje,
                 "score": score
             })
 
         df_radar = pd.DataFrame(status_contas).sort_values(by="score", ascending=False)
 
-        # Alerta de inatividade
-        criticas = df_radar[df_radar["dias_sem_operar"] >= 5]
+        # Alerta de inatividade apenas para quem ainda não operou
+        criticas = df_radar[(df_radar["dias_sem_operar"] >= 5) & (df_radar["operou_hoje"] == False)]
         if not criticas.empty:
             for _, cr in criticas.iterrows():
                 dias_txt = "Nunca operada" if cr["dias_sem_operar"] == 99 else f"{cr['dias_sem_operar']} dias sem trade"
                 st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** está a **{dias_txt}**! Opere hoje para evitar desclassificação.")
 
-        # Alerta de prazo de expiração
+        # Alerta de prazo de expiração para quem não bateu meta
         expirando = df_radar[(df_radar["dias_expira"].notnull()) & (df_radar["dias_expira"] <= 7)]
         if not expirando.empty:
             for _, ex in expirando.iterrows():
@@ -413,33 +416,36 @@ if menu == "📊 Painel Geral":
                 else:
                     st.warning(f"⏳ **PRAZO DE APROVAÇÃO ACABANDO:** Faltam **{ex['dias_expira']} dias corridos** para expirar a conta **{ex['identificador']}**!")
 
-        # EXIBIÇÃO DAS 3 CONTAS LADO A LADO COM O NOVO PADRÃO VISUAL
-        top3 = df_radar.head(3)
-        cols = st.columns(3)
-        for i, (_, row) in enumerate(top3.iterrows()):
-            with cols[i]:
-                ultimos_digitos = extrair_ultimos_digitos(row['nome_original'])
-                
-                # Título com o número da conta no dia e os dígitos finais
-                st.markdown(f"### Conta #{i+1} do dia ({ultimos_digitos})")
-                
-                # Trader e Prazo colocados logo acima do quadro informativo
-                st.markdown(f"👤 **Trader:** `{row['trader']}` &nbsp;|&nbsp; ⏳ **Prazo:** `{row['prazo']}`")
-                
-                # Quadro informativo da conta
-                st.info(f"**Identificação:** `{row['identificador']}`\n\n📌 **Modelo:** `{row['tipo']}` ({row['tamanho']}) | **Fase:** `{row['status']}`")
-                
-                d_txt = "Nunca" if row['dias_sem_operar'] == 99 else f"{row['dias_sem_operar']} dias atrás"
-                st.write(f"🕒 **Última Operação:** {d_txt}")
-                st.metric("Saldo Atual", fmt_moeda(row['saldo_atual']), delta=fmt_moeda(row['pnl']))
-                st.metric("MAM Diária", f"{fmt_moeda(row['mam'])}/dia")
-                st.caption(f"ℹ️ {row['info_mam']}")
+        # FILTRO INTELIGENTE: MOSTRA APENAS AS CONTAS QUE AINDA PRECISAM SER OPERADAS HOJE
+        df_pendentes = df_radar[df_radar["operou_hoje"] == False]
+
+        if df_pendentes.empty:
+            st.success("🎉 **Excelente! Todas as contas já foram operadas hoje e cumpriram a regra de atividade!** Não há contas pendentes para negociação no momento. Bom descanso!")
+        else:
+            top_pendentes = df_pendentes.head(3)
+            qtd_cols = len(top_pendentes)
+            cols = st.columns(qtd_cols)
+            
+            for i, (_, row) in enumerate(top_pendentes.iterrows()):
+                with cols[i]:
+                    ultimos_digitos = extrair_ultimos_digitos(row['nome_original'])
+                    
+                    st.markdown(f"### Conta #{i+1} do dia ({ultimos_digitos})")
+                    st.markdown(f"👤 **Trader:** `{row['trader']}` &nbsp;|&nbsp; ⏳ **Prazo:** `{row['prazo']}`")
+                    st.info(f"**Identificação:** `{row['identificador']}`\n\n📌 **Modelo:** `{row['tipo']}` ({row['tamanho']}) | **Fase:** `{row['status']}`")
+                    
+                    d_txt = "Nunca operada" if row['dias_sem_operar'] == 99 else f"{row['dias_sem_operar']} dias atrás"
+                    st.write(f"🕒 **Última Operação:** {d_txt}")
+                    st.metric("Saldo Atual", fmt_moeda(row['saldo_atual']), delta=fmt_moeda(row['pnl']))
+                    st.metric("MAM Diária", f"{fmt_moeda(row['mam'])}/dia")
+                    st.caption(f"ℹ️ {row['info_mam']}")
 
         st.markdown("---")
         st.subheader("📋 Resumo Consolidado de Todas as Contas")
         
         df_tabela = df_radar.copy()
         df_tabela["Nº"] = range(1, len(df_tabela) + 1)
+        df_tabela["Status Hoje"] = df_tabela["operou_hoje"].apply(lambda x: "✅ Operada Hoje" if x else "⏳ Pendente")
         df_tabela["Saldo Inicial"] = df_tabela["saldo_inicial"].apply(fmt_moeda)
         df_tabela["Saldo Atual"] = df_tabela["saldo_atual"].apply(fmt_moeda)
         df_tabela["P&L Total"] = df_tabela["pnl"].apply(fmt_moeda)
@@ -447,7 +453,7 @@ if menu == "📊 Painel Geral":
         df_tabela["MAM/Dia"] = df_tabela["mam"].apply(fmt_moeda)
 
         cols_exibir = [
-            "Nº", "identificador", "trader", "mesa",
+            "Nº", "Status Hoje", "identificador", "trader", "mesa",
             "tamanho", "tipo", "status", "prazo", "Saldo Inicial", "Saldo Atual",
             "P&L Total", "Falta p/ Meta", "MAM/Dia"
         ]
