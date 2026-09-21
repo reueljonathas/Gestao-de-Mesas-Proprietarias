@@ -6,7 +6,7 @@ import sqlite3
 import calendar
 from datetime import date, datetime
 
-# Configuração da página (Layout limpo padrão)
+# Configuração da página
 st.set_page_config(page_title="Gestão de Mesas CME", layout="wide", page_icon="📈")
 
 # --- FUNÇÕES DE FORMATAÇÃO E CONVERSÃO ---
@@ -39,6 +39,29 @@ def converter_br_para_float(texto):
         limpo = limpo.replace(",", ".")
     return float(limpo)
 
+def formatar_duracao(h, m, s):
+    """Gera texto legível: '45s', '3m 12s', '1h 20m 15s'"""
+    partes = []
+    if h > 0:
+        partes.append(f"{h}h")
+    if m > 0 or h > 0:
+        partes.append(f"{m}m")
+    partes.append(f"{s}s")
+    return " ".join(partes)
+
+def parse_display_duracao(val):
+    """Formata tanto trades antigos (só minutos) quanto os novos (h, m, s)"""
+    if val is None or pd.isna(val):
+        return "-"
+    s_val = str(val)
+    if any(c in s_val for c in ["s", "m", "h"]):
+        return s_val
+    try:
+        num = int(val)
+        return f"{num}m"
+    except:
+        return s_val
+
 # --- BANCO DE DADOS ---
 conn = sqlite3.connect("mesas_v4.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -68,7 +91,7 @@ CREATE TABLE IF NOT EXISTS trades (
     ativo TEXT,
     lotes REAL,
     resultado REAL,
-    duracao_min INTEGER,
+    duracao_min TEXT,
     estrategia TEXT,
     notas TEXT,
     FOREIGN KEY(conta_id) REFERENCES contas(id)
@@ -105,7 +128,7 @@ trades_df = pd.read_sql("SELECT * FROM trades", conn)
 ativos_df = pd.read_sql("SELECT nome FROM ativos ORDER BY nome ASC", conn)
 estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", conn)
 
-# Menu Lateral Atualizado
+# Menu Lateral
 st.sidebar.title("Navegação")
 menu = st.sidebar.radio(
     "Ir para:",
@@ -274,10 +297,11 @@ elif menu == "📁 Minhas Contas":
                 t_view = t_conta.copy()
                 t_view["Data"] = t_view["data"].apply(fmt_data)
                 t_view["Resultado"] = t_view["resultado"].apply(fmt_moeda)
+                t_view["Duração"] = t_view["duracao_min"].apply(parse_display_duracao)
 
                 st.dataframe(
-                    t_view[["Data", "ativo", "lotes", "Resultado", "duracao_min", "estrategia", "notas"]].rename(
-                        columns={"ativo": "Ativo", "lotes": "Lotes", "duracao_min": "Duração (min)", "estrategia": "Estratégia", "notas": "Notas"}
+                    t_view[["Data", "ativo", "lotes", "Resultado", "Duração", "estrategia", "notas"]].rename(
+                        columns={"ativo": "Ativo", "lotes": "Lotes", "estrategia": "Estratégia", "notas": "Notas"}
                     ).sort_values(by="Data", ascending=False),
                     use_container_width=True
                 )
@@ -286,76 +310,89 @@ elif menu == "📁 Minhas Contas":
             else:
                 st.info("Nenhuma operação registrada para esta conta ainda.")
 
-        # --- ABA 2: LANÇAR TRADE + ADICIONAR ATIVOS E ESTRATÉGIAS ---
+        # --- ABA 2: LANÇAR TRADE ---
         with tab_lancar:
             st.subheader(f"Registrar Operação: {c['nome']} ({c['mesa']})")
 
-            # ÁREA RÁPIDA PARA ADICIONAR ATIVOS OU ESTRATÉGIAS
-            with st.expander("⚡ Adicionar Novo Ativo ou Nova Estratégia Rapidamente", expanded=False):
-                col_novo_atv, col_nova_est = st.columns(2)
-                
-                with col_novo_atv:
-                    st.markdown("**Novo Ativo**")
-                    nome_novo_ativo = st.text_input("Símbolo/Ativo (ex: MNQ, 6E, ZB, BTC)", key="input_novo_ativo")
-                    if st.button("➕ Inserir Ativo", key="btn_inserir_ativo"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                data_trade = st.date_input("Data do Pregão (DD/MM/AAAA)", value=date.today(), format="DD/MM/YYYY")
+                lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=1.0, step=0.5)
+
+            with c2:
+                ativo = st.selectbox("Ativo Operado", ativos_df["nome"].tolist())
+                resultado_str = st.text_input("Resultado Líquido ($) (ex: 250,00 ou -150,00)", value="0,00")
+
+            with c3:
+                estrategia = st.selectbox("Estratégia Utilizada", estrategias_df["nome"].tolist())
+                st.markdown("**Duração da Operação**")
+                cd1, cd2, cd3 = st.columns(3)
+                with cd1:
+                    dur_h = st.number_input("Horas", min_value=0, max_value=72, value=0, step=1)
+                with cd2:
+                    dur_m = st.number_input("Min", min_value=0, max_value=59, value=5, step=1)
+                with cd3:
+                    dur_s = st.number_input("Seg", min_value=0, max_value=59, value=0, step=5)
+
+            notas = st.text_area("Observações Técnicas / Psicológicas do Trade")
+
+            st.write("") # Espaçamento visual
+
+            # BOTÕES LADO A LADO: SALVAR | NOVO ATIVO | NOVA ESTRATÉGIA
+            col_salvar, col_add_ativo, col_add_est = st.columns([1, 1.2, 1.2])
+
+            with col_salvar:
+                btn_salvar = st.button("💾 Salvar", type="primary", use_container_width=True)
+
+            with col_add_ativo:
+                with st.popover("➕ Novo Ativo", use_container_width=True):
+                    st.markdown("**Cadastrar Novo Ativo**")
+                    nome_novo_ativo = st.text_input("Símbolo (ex: MNQ, 6E, ZB)", key="pop_ativo")
+                    if st.button("Confirmar Ativo", key="btn_conf_ativo"):
                         if nome_novo_ativo:
                             try:
                                 cursor.execute("INSERT INTO ativos (nome) VALUES (?)", (nome_novo_ativo.strip(),))
                                 conn.commit()
                                 st.toast("Atualizado", icon="✅")
-                                st.success(f"Ativo '{nome_novo_ativo}' adicionado com sucesso!")
+                                st.success(f"Ativo '{nome_novo_ativo}' adicionado!")
                                 st.rerun()
                             except Exception:
                                 st.toast("Erro, e tente novamente", icon="❌")
                                 st.error("Este ativo já existe.")
 
-                with col_nova_est:
-                    st.markdown("**Nova Estratégia**")
-                    nome_nova_est = st.text_input("Estratégia (ex: FVG, Order Block, Rompimento M15)", key="input_nova_est")
-                    if st.button("➕ Inserir Estratégia", key="btn_inserir_estrategia"):
+            with col_add_est:
+                with st.popover("➕ Nova Estratégia", use_container_width=True):
+                    st.markdown("**Cadastrar Nova Estratégia**")
+                    nome_nova_est = st.text_input("Nome da Técnica (ex: FVG, Rompimento)", key="pop_est")
+                    if st.button("Confirmar Estratégia", key="btn_conf_est"):
                         if nome_nova_est:
                             try:
                                 cursor.execute("INSERT INTO estrategias (nome) VALUES (?)", (nome_nova_est.strip(),))
                                 conn.commit()
                                 st.toast("Atualizado", icon="✅")
-                                st.success(f"Estratégia '{nome_nova_est}' adicionada com sucesso!")
+                                st.success(f"Estratégia '{nome_nova_est}' adicionada!")
                                 st.rerun()
                             except Exception:
                                 st.toast("Erro, e tente novamente", icon="❌")
                                 st.error("Esta estratégia já existe.")
 
-            st.markdown("---")
-
-            # FORMULÁRIO DO TRADE
-            with st.form("form_trade_conta"):
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    data_trade = st.date_input("Data do Pregão (DD/MM/AAAA)", value=date.today(), format="DD/MM/YYYY")
-                    ativo = st.selectbox("Ativo Operado", ativos_df["nome"].tolist())
-                with c2:
-                    lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=1.0, step=0.5)
-                    resultado_str = st.text_input("Resultado Líquido ($) (ex: 250,00 ou -150,00)", value="0,00")
-                with c3:
-                    duracao = st.number_input("Duração da Operação (Minutos)", min_value=1, value=15, step=1)
-                    estrategia = st.selectbox("Estratégia Utilizada", estrategias_df["nome"].tolist())
-
-                notas = st.text_area("Observações Técnicas / Psicológicas do Trade")
-                salvar_trade = st.form_submit_button("Salvar Operação Nesta Conta")
-
-                if salvar_trade:
-                    try:
-                        res_float = converter_br_para_float(resultado_str)
-                        cursor.execute("""
-                        INSERT INTO trades (conta_id, data, ativo, lotes, resultado, duracao_min, estrategia, notas)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (c_id, str(data_trade), ativo, lotes, res_float, duracao, estrategia, notas))
-                        conn.commit()
-                        st.toast("Atualizado", icon="✅")
-                        st.success("Trade registrado com sucesso nesta conta!")
-                        st.rerun()
-                    except Exception:
-                        st.toast("Erro, e tente novamente", icon="❌")
-                        st.error("Erro, e tente novamente. Verifique se digitou os valores corretamente.")
+            # Processamento do Salvar Trade
+            if btn_salvar:
+                try:
+                    res_float = converter_br_para_float(resultado_str)
+                    duracao_formatada = formatar_duracao(dur_h, dur_m, dur_s)
+                    
+                    cursor.execute("""
+                    INSERT INTO trades (conta_id, data, ativo, lotes, resultado, duracao_min, estrategia, notas)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (c_id, str(data_trade), ativo, lotes, res_float, duracao_formatada, estrategia, notas))
+                    conn.commit()
+                    st.toast("Atualizado", icon="✅")
+                    st.success("Trade registrado com sucesso!")
+                    st.rerun()
+                except Exception:
+                    st.toast("Erro, e tente novamente", icon="❌")
+                    st.error("Erro, e tente novamente. Verifique os valores inseridos.")
 
         # --- ABA 3: EXCLUIR CONTA SELECIONADA ---
         with tab_gerenciar:
