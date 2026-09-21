@@ -4,6 +4,8 @@ import numpy as np
 import plotly.express as px
 import sqlite3
 import calendar
+import json
+import os
 from datetime import date, datetime
 
 # Configuração da página
@@ -26,7 +28,6 @@ st.markdown("""
 
 # --- FUNÇÕES DE FORMATAÇÃO E CONVERSÃO ---
 def fmt_moeda(valor):
-    """Formata no padrão $ 50.000,00"""
     if valor is None or pd.isna(valor):
         return "$ 0,00"
     sinal = "-" if valor < 0 else ""
@@ -35,7 +36,6 @@ def fmt_moeda(valor):
     return f"{sinal}$ {formatado}"
 
 def fmt_br_input(valor):
-    """Formata float para texto de input: 50.000,00"""
     if valor is None or pd.isna(valor):
         return "0,00"
     sinal = "-" if valor < 0 else ""
@@ -44,7 +44,6 @@ def fmt_br_input(valor):
     return f"{sinal}{formatado}"
 
 def fmt_data(data_str):
-    """Formata no padrão DD/MM/AAAA"""
     if not data_str or pd.isna(data_str):
         return "-"
     try:
@@ -53,7 +52,6 @@ def fmt_data(data_str):
         return str(data_str)
 
 def converter_br_para_float(texto):
-    """Converte '50.000,00' ou '-250,50' para float padrão"""
     if not texto:
         return 0.0
     limpo = str(texto).replace("R$", "").replace("$", "").strip()
@@ -61,7 +59,10 @@ def converter_br_para_float(texto):
         limpo = limpo.replace(".", "").replace(",", ".")
     elif "," in limpo:
         limpo = limpo.replace(",", ".")
-    return float(limpo)
+    try:
+        return float(limpo)
+    except:
+        return 0.0
 
 def formatar_duracao(h, m, s):
     partes = []
@@ -105,8 +106,21 @@ def parse_display_duracao(val):
     except:
         return s_val
 
-# --- BANCO DE DADOS ---
-conn = sqlite3.connect("mesas_v5.db", check_same_thread=False)
+# --- BANCO DE DADOS FIXO COM AUTO-MIGRAÇÃO ---
+DB_NAME = "mesas_pro.db"
+
+# Se o banco atual não existir, mas existirem os bancos anteriores (v5 ou v4), migrar dados automaticamente
+if not os.path.exists(DB_NAME):
+    for legado in ["mesas_v5.db", "mesas_v4.db", "mesas.db"]:
+        if os.path.exists(legado):
+            try:
+                import shutil
+                shutil.copyfile(legado, DB_NAME)
+                break
+            except:
+                pass
+
+conn = sqlite3.connect(DB_NAME, check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -137,7 +151,10 @@ CREATE TABLE IF NOT EXISTS trades (
     conta_id INTEGER,
     data TEXT,
     ativo TEXT,
+    direcao TEXT DEFAULT 'Compra (Long)',
     lotes REAL,
+    pontos REAL DEFAULT 0.0,
+    custos REAL DEFAULT 0.0,
     resultado REAL,
     duracao_min TEXT,
     estrategia TEXT,
@@ -160,6 +177,17 @@ CREATE TABLE IF NOT EXISTS saques (
 cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 
+# Migração segura de colunas na tabela trades caso ela já existisse
+cursor.execute("PRAGMA table_info(trades)")
+t_cols = [r[1] for r in cursor.fetchall()]
+if "direcao" not in t_cols:
+    cursor.execute("ALTER TABLE trades ADD COLUMN direcao TEXT DEFAULT 'Compra (Long)'")
+if "pontos" not in t_cols:
+    cursor.execute("ALTER TABLE trades ADD COLUMN pontos REAL DEFAULT 0.0")
+if "custos" not in t_cols:
+    cursor.execute("ALTER TABLE trades ADD COLUMN custos REAL DEFAULT 0.0")
+
+# Inserção de ativos e estratégias padrão se vazias
 cursor.execute("SELECT COUNT(*) FROM ativos")
 if cursor.fetchone()[0] == 0:
     for a in ["NQ (Nasdaq)", "ES (S&P 500)", "YM (Dow)", "CL (Petróleo)", "GC (Ouro)", "RTY (Russell)"]:
@@ -350,11 +378,11 @@ elif menu == "📁 Minhas Contas":
 
         if is_financiada:
             tab_painel, tab_lancar, tab_saques, tab_gerenciar = st.tabs([
-                "📊 Desempenho da Conta", "➕ Lançar Trade", "💸 Saques da Conta", "⚙️ Opções da Conta"
+                "📊 Desempenho da Conta", "➕ Lançar Trade", "💸 Saques da Conta", "⚙️ Opções & Backup"
             ])
         else:
             tab_painel, tab_lancar, tab_gerenciar = st.tabs([
-                "📊 Desempenho da Conta", "➕ Lançar Trade", "⚙️ Opções da Conta"
+                "📊 Desempenho da Conta", "➕ Lançar Trade", "⚙️ Opções & Backup"
             ])
 
         # --- ABA 1: DESEMPENHO E HISTÓRICO ---
@@ -387,11 +415,12 @@ elif menu == "📁 Minhas Contas":
                 t_view = t_conta.copy()
                 t_view["Data"] = t_view["data"].apply(fmt_data)
                 t_view["Resultado"] = t_view["resultado"].apply(fmt_moeda)
+                t_view["Custos"] = t_view["custos"].apply(fmt_moeda)
                 t_view["Duração"] = t_view["duracao_min"].apply(parse_display_duracao)
 
                 st.dataframe(
-                    t_view[["id", "Data", "ativo", "lotes", "Resultado", "Duração", "estrategia", "notas"]].rename(
-                        columns={"id": "ID", "ativo": "Ativo", "lotes": "Lotes", "estrategia": "Estratégia", "notas": "Notas"}
+                    t_view[["id", "Data", "ativo", "direcao", "lotes", "pontos", "Custos", "Resultado", "Duração", "estrategia", "notas"]].rename(
+                        columns={"id": "ID", "ativo": "Ativo", "direcao": "Direção", "lotes": "Lotes", "pontos": "Pontos", "Custos": "Custos ($)", "Resultado": "Resultado Líquido", "estrategia": "Estratégia", "notas": "Notas"}
                     ).sort_values(by="ID", ascending=False),
                     use_container_width=True
                 )
@@ -400,20 +429,23 @@ elif menu == "📁 Minhas Contas":
             else:
                 st.info("Nenhuma operação registrada para esta conta ainda.")
 
-        # --- ABA 2: LANÇAR TRADE COM PROTEÇÃO ANTI-DUPLICIDADE ---
+        # --- ABA 2: LANÇAR TRADE COM PONTOS, CUSTOS E DIREÇÃO ---
         with tab_lancar:
             st.subheader(f"Registrar Operação: {c['nome']} ({c['mesa']})")
 
             c1, c2, c3 = st.columns(3)
             with c1:
                 data_trade = st.date_input("Data do Pregão (DD/MM/AAAA)", value=date.today(), format="DD/MM/YYYY")
-                lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=None, step=0.5, placeholder="Informe os lotes (ex: 1.0)")
+                ativo = st.selectbox("Ativo Operado", ativos_df["nome"].tolist(), index=None, placeholder="Selecione o Ativo...")
+                direcao = st.selectbox("Direção da Operação", ["Compra (Long)", "Venda (Short)"], index=None, placeholder="Selecione a Direção...")
 
             with c2:
-                ativo = st.selectbox("Ativo Operado", ativos_df["nome"].tolist(), index=None, placeholder="Selecione o Ativo...")
-                resultado_str = st.text_input("Resultado Líquido ($)", value="", placeholder="ex: 250,00 ou -150,00")
+                lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=None, step=0.5, placeholder="ex: 1.0")
+                pontos_str = st.text_input("Pontos na Operação", value="", placeholder="ex: 15,50 ou -8,25")
+                custos_str = st.text_input("Custos / Taxas ($)", value="", placeholder="ex: 4,50")
 
             with c3:
+                resultado_str = st.text_input("Resultado Líquido ($)", value="", placeholder="ex: 250,00 ou -150,00")
                 estrategia = st.selectbox("Estratégia Utilizada", estrategias_df["nome"].tolist(), index=None, placeholder="Selecione a Estratégia...")
                 st.markdown("**Duração da Operação**")
                 cd1, cd2, cd3 = st.columns(3)
@@ -449,9 +481,17 @@ elif menu == "📁 Minhas Contas":
                         t_dados = t_conta_edit[t_conta_edit["id"] == t_id].iloc[0]
 
                         ed_data = st.date_input("Data", value=datetime.strptime(t_dados["data"], "%Y-%m-%d").date(), format="DD/MM/YYYY", key=f"ed_d_{t_id}")
+                        
                         idx_ativo = ativos_df["nome"].tolist().index(t_dados["ativo"]) if t_dados["ativo"] in ativos_df["nome"].tolist() else 0
                         ed_ativo = st.selectbox("Ativo", ativos_df["nome"].tolist(), index=idx_ativo, key=f"ed_atv_{t_id}")
+
+                        dir_opcoes = ["Compra (Long)", "Venda (Short)"]
+                        idx_dir = dir_opcoes.index(t_dados["direcao"]) if t_dados["direcao"] in dir_opcoes else 0
+                        ed_dir = st.selectbox("Direção", dir_opcoes, index=idx_dir, key=f"ed_dir_{t_id}")
+
                         ed_lotes = st.number_input("Lotes", min_value=0.1, value=float(t_dados["lotes"]), step=0.5, key=f"ed_lot_{t_id}")
+                        ed_pontos = st.text_input("Pontos", value=fmt_br_input(t_dados["pontos"]), key=f"ed_pts_{t_id}")
+                        ed_custos = st.text_input("Custos ($)", value=fmt_br_input(t_dados["custos"]), key=f"ed_cst_{t_id}")
                         ed_res_str = st.text_input("Resultado ($)", value=fmt_br_input(t_dados["resultado"]), key=f"ed_res_{t_id}")
 
                         h_ant, m_ant, s_ant = descompactar_duracao(t_dados["duracao_min"])
@@ -473,11 +513,13 @@ elif menu == "📁 Minhas Contas":
                             if st.button("💾 Atualizar Trade", key=f"btn_save_tr_{t_id}"):
                                 try:
                                     res_f = converter_br_para_float(ed_res_str)
+                                    pts_f = converter_br_para_float(ed_pontos)
+                                    cst_f = converter_br_para_float(ed_custos)
                                     dur_str = formatar_duracao(ed_h, ed_m, ed_s)
                                     cursor.execute("""
-                                    UPDATE trades SET data=?, ativo=?, lotes=?, resultado=?, duracao_min=?, estrategia=?, notas=?
+                                    UPDATE trades SET data=?, ativo=?, direcao=?, lotes=?, pontos=?, custos=?, resultado=?, duracao_min=?, estrategia=?, notas=?
                                     WHERE id=?
-                                    """, (str(ed_data), ed_ativo, ed_lotes, res_f, dur_str, ed_est, ed_notas, t_id))
+                                    """, (str(ed_data), ed_ativo, ed_dir, ed_lotes, pts_f, cst_f, res_f, dur_str, ed_est, ed_notas, t_id))
                                     conn.commit()
                                     st.toast("Atualizado", icon="✅")
                                     st.success("Trade atualizado!")
@@ -532,6 +574,8 @@ elif menu == "📁 Minhas Contas":
                 try:
                     if not ativo:
                         raise ValueError("Por favor, selecione o Ativo Operado.")
+                    if not direcao:
+                        raise ValueError("Por favor, selecione a Direção (Compra/Venda).")
                     if not estrategia:
                         raise ValueError("Por favor, selecione a Estratégia Utilizada.")
                     if lotes is None or lotes <= 0:
@@ -540,23 +584,25 @@ elif menu == "📁 Minhas Contas":
                         raise ValueError("Informe o Resultado Líquido do trade.")
 
                     res_float = converter_br_para_float(resultado_str)
+                    pts_float = converter_br_para_float(pontos_str)
+                    cst_float = converter_br_para_float(custos_str)
                     duracao_formatada = formatar_duracao(dur_h, dur_m, dur_s)
 
                     # Verificação Anti-Duplicação para Trades
                     cursor.execute("""
                     SELECT id FROM trades 
-                    WHERE conta_id = ? AND data = ? AND ativo = ? AND lotes = ? AND resultado = ? AND estrategia = ?
-                    """, (c_id, str(data_trade), ativo, lotes, res_float, estrategia))
+                    WHERE conta_id = ? AND data = ? AND ativo = ? AND lotes = ? AND resultado = ? AND direcao = ?
+                    """, (c_id, str(data_trade), ativo, lotes, res_float, direcao))
                     trade_duplicado = cursor.fetchone()
 
                     if trade_duplicado:
                         st.toast("Operação repetida prevenida!", icon="⚠️")
-                        st.warning("⚠️ **Prevenção de Duplicação:** Uma operação exatamente idêntica já foi salva nesta conta hoje. O lançamento duplicado foi bloqueado para evitar cliques repetidos.")
+                        st.warning("⚠️ **Prevenção de Duplicação:** Uma operação idêntica com este ativo e resultado já foi salva nesta conta hoje. O duplo clique foi prevenido.")
                     else:
                         cursor.execute("""
-                        INSERT INTO trades (conta_id, data, ativo, lotes, resultado, duracao_min, estrategia, notas)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (c_id, str(data_trade), ativo, lotes, res_float, duracao_formatada, estrategia, notas))
+                        INSERT INTO trades (conta_id, data, ativo, direcao, lotes, pontos, custos, resultado, duracao_min, estrategia, notas)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (c_id, str(data_trade), ativo, direcao, lotes, pts_float, cst_float, res_float, duracao_formatada, estrategia, notas))
                         conn.commit()
                         st.toast("Atualizado", icon="✅")
                         st.success("Trade registrado com sucesso!")
@@ -564,9 +610,9 @@ elif menu == "📁 Minhas Contas":
                 except ValueError as ve:
                     st.toast("Erro, e tente novamente", icon="❌")
                     st.error(f"Atenção: {str(ve)}")
-                except Exception:
+                except Exception as e:
                     st.toast("Erro, e tente novamente", icon="❌")
-                    st.error("Erro, e tente novamente. Verifique os valores inseridos.")
+                    st.error(f"Erro ao salvar: {str(e)}")
 
         # --- ABA EXCLUSIVA DE SAQUES (APENAS CONTAS FUNDED OU LIVE) ---
         if is_financiada:
@@ -634,11 +680,11 @@ elif menu == "📁 Minhas Contas":
                         use_container_width=True
                     )
 
-        # --- ABA DE OPÇÕES DA CONTA (EDITAR CUSTOS & DADOS) ---
+        # --- ABA DE OPÇÕES DA CONTA & SISTEMA DE BACKUP ---
         with tab_gerenciar:
             st.subheader(f"⚙️ Configurações da Conta: {c['nome']} ({c['mesa']})")
             
-            with st.expander("✏️ Editar Dados e Custos Desta Conta", expanded=True):
+            with st.expander("✏️ Editar Dados e Custos Desta Conta", expanded=False):
                 with st.form("form_editar_conta_atual"):
                     c1_ed, c2_ed = st.columns(2)
                     with c1_ed:
@@ -656,11 +702,8 @@ elif menu == "📁 Minhas Contas":
 
                         status_opcoes = ["Challenge (avaliação)", "Funded (Financiada)", "Live (Real)"]
                         status_salvo = c.get('status', 'Challenge (avaliação)')
-                        if status_salvo == "Em Avaliação": status_salvo = "Challenge (avaliação)"
-                        elif status_salvo == "Financiada (Live)": status_salvo = "Funded (Financiada)"
-                        
                         idx_status = status_opcoes.index(status_salvo) if status_salvo in status_opcoes else 0
-                        ed_status = st.selectbox("Fase / Status da Conta", status_opcoes, index=idx_status, help="Selecione 'Funded (Financiada)' ou 'Live (Real)' para liberar a aba de saques.")
+                        ed_status = st.selectbox("Fase / Status da Conta", status_opcoes, index=idx_status)
 
                     with c2_ed:
                         ed_saldo = st.text_input("Saldo Inicial ($)", value=fmt_br_input(c['saldo_inicial']))
@@ -703,6 +746,65 @@ elif menu == "📁 Minhas Contas":
                         except Exception as e:
                             st.toast("Erro, e tente novamente", icon="❌")
                             st.error(f"Erro ao atualizar a conta: {str(e)}")
+
+            # --- SISTEMA DE BACKUP E RESTAURAÇÃO DE DADOS ---
+            st.markdown("---")
+            st.subheader("💾 Backup e Segurança dos Seus Dados")
+            st.caption("Baixe um arquivo com todas as suas contas, trades e saques para guardar com 100% de segurança no seu computador.")
+            
+            col_bk1, col_bk2 = st.columns(2)
+            with col_bk1:
+                # Gerar JSON de Backup
+                dados_backup = {
+                    "contas": pd.read_sql("SELECT * FROM contas", conn).to_dict(orient="records"),
+                    "trades": pd.read_sql("SELECT * FROM trades", conn).to_dict(orient="records"),
+                    "saques": pd.read_sql("SELECT * FROM saques", conn).to_dict(orient="records"),
+                    "ativos": pd.read_sql("SELECT * FROM ativos", conn).to_dict(orient="records"),
+                    "estrategias": pd.read_sql("SELECT * FROM estrategias", conn).to_dict(orient="records")
+                }
+                backup_json = json.dumps(dados_backup, ensure_ascii=False, indent=2)
+                st.download_button(
+                    "📥 Baixar Backup Geral (.json)",
+                    data=backup_json,
+                    file_name=f"backup_mesas_{date.today().strftime('%d_%m_%Y')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+
+            with col_bk2:
+                arquivo_restaurar = st.file_uploader("📤 Restaurar Backup (.json)", type=["json"], label_visibility="collapsed")
+                if arquivo_restaurar is not None:
+                    if st.button("Restaurar Meus Dados Agora", use_container_width=True):
+                        try:
+                            conteudo = json.load(arquivo_restaurar)
+                            # Restaurar tabelas
+                            if "contas" in conteudo and conteudo["contas"]:
+                                cursor.execute("DELETE FROM contas")
+                                for r in conteudo["contas"]:
+                                    cols = ", ".join(r.keys())
+                                    places = ", ".join(["?"] * len(r))
+                                    cursor.execute(f"INSERT INTO contas ({cols}) VALUES ({places})", list(r.values()))
+
+                            if "trades" in conteudo and conteudo["trades"]:
+                                cursor.execute("DELETE FROM trades")
+                                for r in conteudo["trades"]:
+                                    cols = ", ".join(r.keys())
+                                    places = ", ".join(["?"] * len(r))
+                                    cursor.execute(f"INSERT INTO trades ({cols}) VALUES ({places})", list(r.values()))
+
+                            if "saques" in conteudo and conteudo["saques"]:
+                                cursor.execute("DELETE FROM saques")
+                                for r in conteudo["saques"]:
+                                    cols = ", ".join(r.keys())
+                                    places = ", ".join(["?"] * len(r))
+                                    cursor.execute(f"INSERT INTO saques ({cols}) VALUES ({places})", list(r.values()))
+
+                            conn.commit()
+                            st.toast("Backup Restaurado com Sucesso!", icon="✅")
+                            st.success("Todos os seus dados foram restaurados!")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Erro ao restaurar arquivo: {str(ex)}")
 
             st.markdown("---")
             st.subheader("Zona de Perigo")
