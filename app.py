@@ -6,6 +6,7 @@ import sqlite3
 import calendar
 import json
 import os
+import re
 from datetime import date, datetime, timedelta
 
 # Configuração da página
@@ -63,6 +64,17 @@ def converter_br_para_float(texto):
         return float(limpo)
     except:
         return 0.0
+
+def extrair_ultimos_digitos(texto):
+    """Extrai os últimos dígitos do identificador da conta"""
+    if not texto:
+        return "----"
+    nums = re.findall(r'\d+', str(texto))
+    if nums:
+        bloco = nums[-1]
+        return bloco[-4:] if len(bloco) >= 4 else bloco
+    s = str(texto).strip()
+    return s[-4:] if len(s) >= 4 else s
 
 def formatar_duracao(h, m, s):
     partes = []
@@ -203,7 +215,7 @@ CREATE TABLE IF NOT EXISTS saques (
 cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 
-# Migração de colunas
+# Migrações de segurança
 cursor.execute("PRAGMA table_info(contas)")
 c_cols = [r[1] for r in cursor.fetchall()]
 if "prazo_avaliacao" not in c_cols:
@@ -327,7 +339,7 @@ if menu == "📊 Painel Geral":
         st.markdown("---")
 
         st.subheader("🎯 Radar Diário: Contas Recomendadas para Hoje (Máx 3)")
-        st.caption("Foco disciplinado: Evite inatividade de 7 dias e priorize contas que exigem performance.")
+        st.caption("Organizadas lado a lado por ordem de criticidade: da mais prioritária para a menos crítica.")
 
         hoje = date.today()
         status_contas = []
@@ -363,6 +375,7 @@ if menu == "📊 Painel Geral":
 
             status_contas.append({
                 "id": c["id"],
+                "nome_original": c["nome"],
                 "identificador": f"{c['nome']} ({c['mesa']})",
                 "trader": c["trader"],
                 "mesa": c["mesa"],
@@ -396,17 +409,25 @@ if menu == "📊 Painel Geral":
         if not expirando.empty:
             for _, ex in expirando.iterrows():
                 if ex["dias_expira"] < 0:
-                    st.error(f"🚨 **PRAZO ESGOTADO:** A conta **{ex['identificador']}** ultrapassou o prazo ({abs(ex['dias_expira'])} dias expirada)!")
+                    st.error(f"🚨 **PRAZO ESGOTADO:** A conta **{ex['identificador']}** ultrapassou o prazo da mesa ({abs(ex['dias_expira'])} dias expirada)!")
                 else:
                     st.warning(f"⏳ **PRAZO DE APROVAÇÃO ACABANDO:** Faltam **{ex['dias_expira']} dias corridos** para expirar a conta **{ex['identificador']}**!")
 
+        # EXIBIÇÃO DAS 3 CONTAS LADO A LADO COM O NOVO PADRÃO VISUAL
         top3 = df_radar.head(3)
         cols = st.columns(3)
         for i, (_, row) in enumerate(top3.iterrows()):
             with cols[i]:
-                titulo = "⭐ MÁXIMA ATENÇÃO: FOCO EM PERFORMANCE" if i == 0 else f"Opção #{i+1} do Dia"
-                st.markdown(f"#### {titulo}")
-                st.info(f"**{row['identificador']}**\n\n👤 Trader: `{row['trader']}` | Tam: `{row['tamanho']}`\n\n📌 Prazo: `{row['prazo']}`")
+                ultimos_digitos = extrair_ultimos_digitos(row['nome_original'])
+                
+                # Título com o número da conta no dia e os dígitos finais
+                st.markdown(f"### Conta #{i+1} do dia ({ultimos_digitos})")
+                
+                # Trader e Prazo colocados logo acima do quadro informativo
+                st.markdown(f"👤 **Trader:** `{row['trader']}` &nbsp;|&nbsp; ⏳ **Prazo:** `{row['prazo']}`")
+                
+                # Quadro informativo da conta
+                st.info(f"**Identificação:** `{row['identificador']}`\n\n📌 **Modelo:** `{row['tipo']}` ({row['tamanho']}) | **Fase:** `{row['status']}`")
                 
                 d_txt = "Nunca" if row['dias_sem_operar'] == 99 else f"{row['dias_sem_operar']} dias atrás"
                 st.write(f"🕒 **Última Operação:** {d_txt}")
@@ -418,7 +439,6 @@ if menu == "📊 Painel Geral":
         st.subheader("📋 Resumo Consolidado de Todas as Contas")
         
         df_tabela = df_radar.copy()
-        # Numeração iniciando em 1 (sem o 0)
         df_tabela["Nº"] = range(1, len(df_tabela) + 1)
         df_tabela["Saldo Inicial"] = df_tabela["saldo_inicial"].apply(fmt_moeda)
         df_tabela["Saldo Atual"] = df_tabela["saldo_atual"].apply(fmt_moeda)
@@ -456,7 +476,6 @@ elif menu == "📁 Minhas Contas":
         st.title("📁 Minhas Contas")
         st.warning("Cadastre suas contas na aba '➕ Cadastrar' primeiro.")
     else:
-        # Mapeamento sequencial limpo (Conta #1, Conta #2...) independente do ID interno
         mapa_contas = {}
         lista_opcoes = []
         for idx_c, (_, c_row) in enumerate(contas_df.iterrows(), start=1):
@@ -587,7 +606,6 @@ elif menu == "📁 Minhas Contas":
                         t_dados = t_conta_edit[t_conta_edit["id"] == t_id].iloc[0]
 
                         ed_data = st.date_input("Data", value=datetime.strptime(t_dados["data"], "%Y-%m-%d").date(), format="DD/MM/YYYY", key=f"ed_d_{t_id}")
-                        
                         idx_ativo = ativos_df["nome"].tolist().index(t_dados["ativo"]) if t_dados["ativo"] in ativos_df["nome"].tolist() else 0
                         ed_ativo = st.selectbox("Ativo", ativos_df["nome"].tolist(), index=idx_ativo, key=f"ed_atv_{t_id}")
 
@@ -978,7 +996,6 @@ elif menu == "🛡️ Regras e Compliance":
     if contas_df.empty:
         st.warning("Nenhuma conta encontrada.")
     else:
-        # Seletor com numeração sequencial limpa
         mapa_contas_audit = {}
         lista_contas_audit = []
         for idx_a, (_, c_aud) in enumerate(contas_df.iterrows(), start=1):
@@ -1142,7 +1159,6 @@ elif menu == "🛡️ Regras e Compliance":
                 st.success("✅ **DENTRO DA REGRA:** Todas as suas operações duraram pelo menos 30 segundos.")
 
         # 5. DRAWDOWN TRAILING vs EOD
-        st.markdown("---")
         st.subheader("5. Monitoramento de Drawdown")
         
         if is_ylos and tipo_conta in ["Standard", "No Activation"] and status_conta in ["Funded (Financiada)", "Live (Real)"]:
@@ -1231,7 +1247,7 @@ elif menu == "💾 Backup":
 
     st.markdown("---")
     st.subheader("🧹 Zerar Banco de Dados para Início Oficial")
-    st.caption("Use esta opção apenas se quiser apagar todos os testes feitos até agora para começar o cadastro oficial com a primeira conta sendo a Conta #1.")
+    st.caption("Use esta opção se quiser apagar todos os testes feitos até agora para começar o cadastro oficial com a primeira conta sendo a Conta #1.")
     
     chk_reset_total = st.checkbox("⚠️ Confirmo que desejo apagar todas as contas e trades de teste e reiniciar a numeração para 1.")
     if st.button("Zerar Sistema para Início Oficial"):
