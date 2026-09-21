@@ -6,7 +6,6 @@ import sqlite3
 import calendar
 import json
 import os
-import re
 from datetime import date, datetime, timedelta
 
 # Configuração da página
@@ -64,21 +63,6 @@ def converter_br_para_float(texto):
         return float(limpo)
     except:
         return 0.0
-
-def obter_final_conta(nome):
-    """Extrai com precisão os últimos 4 dígitos numéricos do nome/número da conta"""
-    if not nome:
-        return "----"
-    s = str(nome).strip()
-    numeros = re.findall(r'\d+', s)
-    if numeros:
-        ultimo_bloco = numeros[-1]
-        if len(ultimo_bloco) >= 4:
-            return ultimo_bloco[-4:]
-        todos_juntos = "".join(numeros)
-        if len(todos_juntos) >= 4:
-            return todos_juntos[-4:]
-    return s[-4:] if len(s) >= 4 else s
 
 def formatar_duracao(h, m, s):
     partes = []
@@ -362,7 +346,6 @@ if menu == "📊 Painel Geral":
             saldo_conta = c["saldo_inicial"] + lucro_conta
             
             mam, falta_meta, info_mam, dias_expira = calcular_mam_conta(c, saldo_conta)
-            final_4 = obter_final_conta(c["nome"])
 
             score = 0
             if dias_sem_operar >= 5:
@@ -381,7 +364,6 @@ if menu == "📊 Painel Geral":
             status_contas.append({
                 "id": c["id"],
                 "identificador": f"{c['nome']} ({c['mesa']})",
-                "final_4": final_4,
                 "trader": c["trader"],
                 "mesa": c["mesa"],
                 "tamanho": c["tamanho_conta"],
@@ -407,16 +389,16 @@ if menu == "📊 Painel Geral":
         if not criticas.empty:
             for _, cr in criticas.iterrows():
                 dias_txt = "Nunca operada" if cr["dias_sem_operar"] == 99 else f"{cr['dias_sem_operar']} dias sem trade"
-                st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']} [Final: {cr['final_4']}]** está a **{dias_txt}**! Opere hoje para evitar desclassificação.")
+                st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** está a **{dias_txt}**! Opere hoje para evitar desclassificação.")
 
         # Alerta de prazo de expiração
         expirando = df_radar[(df_radar["dias_expira"].notnull()) & (df_radar["dias_expira"] <= 7)]
         if not expirando.empty:
             for _, ex in expirando.iterrows():
                 if ex["dias_expira"] < 0:
-                    st.error(f"🚨 **PRAZO ESGOTADO:** A conta **{ex['identificador']} [Final: {ex['final_4']}]** ultrapassou o prazo ({abs(ex['dias_expira'])} dias expirada)!")
+                    st.error(f"🚨 **PRAZO ESGOTADO:** A conta **{ex['identificador']}** ultrapassou o prazo ({abs(ex['dias_expira'])} dias expirada)!")
                 else:
-                    st.warning(f"⏳ **PRAZO DE APROVAÇÃO ACABANDO:** Faltam **{ex['dias_expira']} dias corridos** para expirar a conta **{ex['identificador']} [Final: {ex['final_4']}]**!")
+                    st.warning(f"⏳ **PRAZO DE APROVAÇÃO ACABANDO:** Faltam **{ex['dias_expira']} dias corridos** para expirar a conta **{ex['identificador']}**!")
 
         top3 = df_radar.head(3)
         cols = st.columns(3)
@@ -424,7 +406,7 @@ if menu == "📊 Painel Geral":
             with cols[i]:
                 titulo = "⭐ MÁXIMA ATENÇÃO: FOCO EM PERFORMANCE" if i == 0 else f"Opção #{i+1} do Dia"
                 st.markdown(f"#### {titulo}")
-                st.info(f"**{row['identificador']}**\n\n🎯 **Final:** `{row['final_4']}` | 👤 Trader: `{row['trader']}`\n\n📌 Prazo: `{row['prazo']}`")
+                st.info(f"**{row['identificador']}**\n\n👤 Trader: `{row['trader']}` | Tam: `{row['tamanho']}`\n\n📌 Prazo: `{row['prazo']}`")
                 
                 d_txt = "Nunca" if row['dias_sem_operar'] == 99 else f"{row['dias_sem_operar']} dias atrás"
                 st.write(f"🕒 **Última Operação:** {d_txt}")
@@ -438,8 +420,6 @@ if menu == "📊 Painel Geral":
         df_tabela = df_radar.copy()
         # Numeração iniciando em 1 (sem o 0)
         df_tabela["Nº"] = range(1, len(df_tabela) + 1)
-        # Destaque com os últimos 4 dígitos
-        df_tabela["Final (4 Dígitos)"] = df_tabela["final_4"].apply(lambda x: f"🔹 {x}")
         df_tabela["Saldo Inicial"] = df_tabela["saldo_inicial"].apply(fmt_moeda)
         df_tabela["Saldo Atual"] = df_tabela["saldo_atual"].apply(fmt_moeda)
         df_tabela["P&L Total"] = df_tabela["pnl"].apply(fmt_moeda)
@@ -447,7 +427,7 @@ if menu == "📊 Painel Geral":
         df_tabela["MAM/Dia"] = df_tabela["mam"].apply(fmt_moeda)
 
         cols_exibir = [
-            "Nº", "Final (4 Dígitos)", "identificador", "trader", "mesa",
+            "Nº", "identificador", "trader", "mesa",
             "tamanho", "tipo", "status", "prazo", "Saldo Inicial", "Saldo Atual",
             "P&L Total", "Falta p/ Meta", "MAM/Dia"
         ]
@@ -465,7 +445,7 @@ if menu == "📊 Painel Geral":
                 }
             ),
             use_container_width=True,
-            hide_index=True # Oculta o índice 0, 1, 2... padrão do sistema
+            hide_index=True
         )
 
 # =========================================================
@@ -476,22 +456,23 @@ elif menu == "📁 Minhas Contas":
         st.title("📁 Minhas Contas")
         st.warning("Cadastre suas contas na aba '➕ Cadastrar' primeiro.")
     else:
-        # Seletor com identificação dos últimos 4 dígitos em destaque
-        lista_opcoes = [
-            f"{c['id']} - {c['nome']} [Final: {obter_final_conta(c['nome'])}] — {c['mesa']} ({c['tamanho_conta']}) | {c['tipo']} [{c['status']}]"
-            for _, c in contas_df.iterrows()
-        ]
+        # Mapeamento sequencial limpo (Conta #1, Conta #2...) independente do ID interno
+        mapa_contas = {}
+        lista_opcoes = []
+        for idx_c, (_, c_row) in enumerate(contas_df.iterrows(), start=1):
+            rotulo = f"Conta #{idx_c}: {c_row['nome']} — {c_row['mesa']} ({c_row['tamanho_conta']}) | {c_row['tipo']} [{c_row['status']}]"
+            lista_opcoes.append(rotulo)
+            mapa_contas[rotulo] = int(c_row['id'])
         
         conta_sel = st.selectbox("📂 Selecione a Conta para Acessar:", lista_opcoes)
-        c_id = int(conta_sel.split(" - ")[0])
+        c_id = mapa_contas[conta_sel]
         c = contas_df[contas_df["id"] == c_id].iloc[0]
 
-        final_4_c = obter_final_conta(c["nome"])
         status_atual = c.get("status", "Challenge (avaliação)")
         is_financiada = status_atual in ["Funded (Financiada)", "Live (Real)"]
 
         st.title(f"📈 {c['nome']} — {c['mesa']}")
-        st.markdown(f"🎯 **Final da Conta:** `{final_4_c}` | 👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Modelo:** `{c['tipo']}` | **Fase:** `{status_atual}`")
+        st.markdown(f"👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Modelo:** `{c['tipo']}` | **Fase:** `{status_atual}`")
 
         if is_financiada:
             tab_painel, tab_lancar, tab_saques, tab_gerenciar = st.tabs([
@@ -556,7 +537,7 @@ elif menu == "📁 Minhas Contas":
 
         # --- ABA 2: LANÇAR TRADE ---
         with tab_lancar:
-            st.subheader(f"Registrar Operação: {c['nome']} [Final: {final_4_c}] ({c['mesa']})")
+            st.subheader(f"Registrar Operação: {c['nome']} ({c['mesa']})")
 
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -606,6 +587,7 @@ elif menu == "📁 Minhas Contas":
                         t_dados = t_conta_edit[t_conta_edit["id"] == t_id].iloc[0]
 
                         ed_data = st.date_input("Data", value=datetime.strptime(t_dados["data"], "%Y-%m-%d").date(), format="DD/MM/YYYY", key=f"ed_d_{t_id}")
+                        
                         idx_ativo = ativos_df["nome"].tolist().index(t_dados["ativo"]) if t_dados["ativo"] in ativos_df["nome"].tolist() else 0
                         ed_ativo = st.selectbox("Ativo", ativos_df["nome"].tolist(), index=idx_ativo, key=f"ed_atv_{t_id}")
 
@@ -739,7 +721,7 @@ elif menu == "📁 Minhas Contas":
         # --- ABA EXCLUSIVA DE SAQUES (APENAS CONTAS FUNDED OU LIVE) ---
         if is_financiada:
             with tab_saques:
-                st.subheader(f"💸 Gestão de Saques: {c['nome']} [Final: {final_4_c}] ({c['mesa']})")
+                st.subheader(f"💸 Gestão de Saques: {c['nome']} ({c['mesa']})")
                 st.caption("Registre suas retiradas para controle de histórico e reinício automático da janela de consistência.")
 
                 saques_conta = saques_df[saques_df["conta_id"] == c_id].copy()
@@ -805,7 +787,7 @@ elif menu == "📁 Minhas Contas":
 
         # --- ABA DE OPÇÕES DA CONTA ---
         with tab_gerenciar:
-            st.subheader(f"⚙️ Configurações da Conta: {c['nome']} [Final: {final_4_c}] ({c['mesa']})")
+            st.subheader(f"⚙️ Configurações da Conta: {c['nome']} ({c['mesa']})")
             
             with st.expander("✏️ Editar Dados, Prazo e Custos Desta Conta", expanded=True):
                 with st.form("form_editar_conta_atual"):
@@ -961,7 +943,6 @@ elif menu == "💰 Relatório Financeiro":
 
             relatorio_linhas.append({
                 "Nº": idx_rel,
-                "Final (4 Dígitos)": f"🔹 {obter_final_conta(r['nome'])}",
                 "Conta": f"{r['nome']} ({r['mesa']})",
                 "Fase": r.get("status", "Challenge (avaliação)"),
                 "Tipo": r["tipo"],
@@ -981,11 +962,10 @@ elif menu == "💰 Relatório Financeiro":
 
         st.subheader("📈 Comparativo: Capital Investido vs. Retorno por Conta")
         graf_df = contas_df[["nome", "custo_total", "total_saques"]].copy()
-        graf_df["Conta_Ref"] = graf_df["nome"].apply(lambda x: f"{x} [{obter_final_conta(x)}]")
         graf_df = graf_df.rename(columns={"custo_total": "Total Investido ($)", "total_saques": "Total Sacado ($)"})
-        graf_melt = graf_df.melt(id_vars=["Conta_Ref"], value_vars=["Total Investido ($)", "Total Sacado ($)"], var_name="Métrica", value_name="Valor ($)")
+        graf_melt = graf_df.melt(id_vars=["nome"], value_vars=["Total Investido ($)", "Total Sacado ($)"], var_name="Métrica", value_name="Valor ($)")
         
-        fig_bar = px.bar(graf_melt, x="Conta_Ref", y="Valor ($)", color="Métrica", barmode="group", title="Investido vs. Retorno Sacado por Conta")
+        fig_bar = px.bar(graf_melt, x="nome", y="Valor ($)", color="Métrica", barmode="group", title="Investido vs. Retorno Sacado por Conta")
         st.plotly_chart(fig_bar, use_container_width=True)
 
 # =========================================================
@@ -998,16 +978,22 @@ elif menu == "🛡️ Regras e Compliance":
     if contas_df.empty:
         st.warning("Nenhuma conta encontrada.")
     else:
-        lista_contas = [f"{c['id']} - {c['nome']} [Final: {obter_final_conta(c['nome'])}] ({c['mesa']}) | {c['tipo']} [{c['status']}]" for _, c in contas_df.iterrows()]
-        conta_sel = st.selectbox("Selecione a Conta para Auditoria:", lista_contas)
-        c_id = int(conta_sel.split(" - ")[0])
+        # Seletor com numeração sequencial limpa
+        mapa_contas_audit = {}
+        lista_contas_audit = []
+        for idx_a, (_, c_aud) in enumerate(contas_df.iterrows(), start=1):
+            rotulo_aud = f"Conta #{idx_a}: {c_aud['nome']} ({c_aud['mesa']}) | {c_aud['tipo']} [{c_aud['status']}]"
+            lista_contas_audit.append(rotulo_aud)
+            mapa_contas_audit[rotulo_aud] = int(c_aud['id'])
+
+        conta_sel = st.selectbox("Selecione a Conta para Auditoria:", lista_contas_audit)
+        c_id = mapa_contas_audit[conta_sel]
         c_info = contas_df[contas_df["id"] == c_id].iloc[0]
 
         mesa_nome = str(c_info["mesa"]).strip().lower()
         is_ylos = "ylos" in mesa_nome
         tipo_conta = str(c_info["tipo"]).strip()
         status_conta = str(c_info["status"]).strip()
-        final_4_audit = obter_final_conta(c_info["nome"])
 
         t_all = trades_df[trades_df["conta_id"] == c_id].copy()
         if not t_all.empty and c_info["data_inicio_janela"]:
@@ -1015,7 +1001,7 @@ elif menu == "🛡️ Regras e Compliance":
         else:
             t_janela = t_all.copy()
 
-        st.markdown(f"### Conta: `{c_info['nome']}` | 🎯 Final: `{final_4_audit}` | Mesa: `{c_info['mesa']}` | Modelo: `{tipo_conta}` | Fase: `{status_conta}`")
+        st.markdown(f"### Conta: `{c_info['nome']}` | Mesa: `{c_info['mesa']}` | Modelo: `{tipo_conta}` | Fase: `{status_conta}`")
         st.write(f"**Total em Saques:** `{fmt_moeda(c_info['total_saques'])}` | **Janela Atual Iniciada em:** `{fmt_data(c_info['data_inicio_janela'])}` | **Regra de Prazo:** `{c_info.get('prazo_avaliacao', 'Sem prazo')}`")
         st.markdown("---")
 
@@ -1155,9 +1141,8 @@ elif menu == "🛡️ Regras e Compliance":
             else:
                 st.success("✅ **DENTRO DA REGRA:** Todas as suas operações duraram pelo menos 30 segundos.")
 
-        st.markdown("---")
-
         # 5. DRAWDOWN TRAILING vs EOD
+        st.markdown("---")
         st.subheader("5. Monitoramento de Drawdown")
         
         if is_ylos and tipo_conta in ["Standard", "No Activation"] and status_conta in ["Funded (Financiada)", "Live (Real)"]:
@@ -1244,6 +1229,27 @@ elif menu == "💾 Backup":
                 except Exception as ex:
                     st.error(f"Erro ao processar arquivo de restauração: {str(ex)}")
 
+    st.markdown("---")
+    st.subheader("🧹 Zerar Banco de Dados para Início Oficial")
+    st.caption("Use esta opção apenas se quiser apagar todos os testes feitos até agora para começar o cadastro oficial com a primeira conta sendo a Conta #1.")
+    
+    chk_reset_total = st.checkbox("⚠️ Confirmo que desejo apagar todas as contas e trades de teste e reiniciar a numeração para 1.")
+    if st.button("Zerar Sistema para Início Oficial"):
+        if chk_reset_total:
+            try:
+                cursor.execute("DELETE FROM saques")
+                cursor.execute("DELETE FROM trades")
+                cursor.execute("DELETE FROM contas")
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('contas', 'trades', 'saques')")
+                conn.commit()
+                st.toast("Banco zerado! A próxima conta será a Conta #1.", icon="✅")
+                st.success("Tudo zerado com sucesso! Agora você pode ir em '➕ Cadastrar' e cadastrar sua Conta #1.")
+                st.rerun()
+            except Exception as e_reset:
+                st.error(f"Erro ao zerar banco: {str(e_reset)}")
+        else:
+            st.warning("Marque a caixa de confirmação acima para prosseguir com o reset.")
+
 # =========================================================
 # 6. CADASTRAR NOVA CONTA (COM AUTO-PREENCHIMENTO DE SALDO)
 # =========================================================
@@ -1282,7 +1288,7 @@ elif menu == "➕ Cadastrar":
 
     c1, c2 = st.columns(2)
     with c1:
-        nome = st.text_input("Identificação da Conta (ex: YLOS-1029384 ou Apex #4928)", value="", placeholder="ex: YLOS-1029384")
+        nome = st.text_input("Identificação da Conta", value="", placeholder="ex: Apex 50k #1 ou Ylos Freedom")
         trader = st.text_input("Nome do Trader Responsável", value="", placeholder="Nome do Trader")
         mesa = st.text_input("Nome da Mesa", value="", placeholder="ex: Ylos Trading, Mide Global, Apex")
         
