@@ -6,7 +6,7 @@ import sqlite3
 import calendar
 import json
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 # Configuração da página
 st.set_page_config(page_title="Gestão de Mesas CME", layout="wide", page_icon="📈")
@@ -110,6 +110,30 @@ def parse_display_duracao(val):
     except:
         return s_val
 
+# --- CÁLCULOS DE DIAS ÚTEIS E PREGÕES CME ---
+def dias_uteis_mes_atual():
+    """Calcula pregões CME restantes do mês atual (renovação mensal contínua)"""
+    hoje = date.today()
+    _, ultimo_dia = calendar.monthrange(hoje.year, hoje.month)
+    uteis = 0
+    for d in range(hoje.day, ultimo_dia + 1):
+        if date(hoje.year, hoje.month, d).weekday() < 5:
+            uteis += 1
+    return max(1, uteis)
+
+def dias_uteis_ate_limite(data_limite):
+    """Calcula pregões CME até uma data de expiração fixa (30 ou 60 dias)"""
+    hoje = date.today()
+    if data_limite < hoje:
+        return 0
+    uteis = 0
+    cur = hoje
+    while cur <= data_limite:
+        if cur.weekday() < 5:
+            uteis += 1
+        cur += timedelta(days=1)
+    return max(1, uteis)
+
 # --- BANCO DE DADOS FIXO COM AUTO-MIGRAÇÃO ---
 DB_NAME = "mesas_pro.db"
 
@@ -144,7 +168,8 @@ CREATE TABLE IF NOT EXISTS contas (
     custo_reset REAL DEFAULT 0.0,
     outros_custos REAL DEFAULT 0.0,
     total_saques REAL DEFAULT 0.0,
-    data_inicio_janela TEXT
+    data_inicio_janela TEXT,
+    prazo_avaliacao TEXT DEFAULT 'Sem prazo máximo (Indeterminado / Ylos)'
 )
 """)
 
@@ -180,6 +205,12 @@ CREATE TABLE IF NOT EXISTS saques (
 cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 
+# Migração de colunas caso o banco já existisse
+cursor.execute("PRAGMA table_info(contas)")
+c_cols = [r[1] for r in cursor.fetchall()]
+if "prazo_avaliacao" not in c_cols:
+    cursor.execute("ALTER TABLE contas ADD COLUMN prazo_avaliacao TEXT DEFAULT 'Sem prazo máximo (Indeterminado / Ylos)'")
+
 cursor.execute("PRAGMA table_info(trades)")
 t_cols = [r[1] for r in cursor.fetchall()]
 if "direcao" not in t_cols:
@@ -201,21 +232,54 @@ if cursor.fetchone()[0] == 0:
 
 conn.commit()
 
-# --- CÁLCULO PREGÕES CME RESTANTES ---
-def dias_uteis_cme_restantes():
-    hoje = date.today()
-    _, ultimo_dia = calendar.monthrange(hoje.year, hoje.month)
-    uteis = 0
-    for d in range(hoje.day, ultimo_dia + 1):
-        if date(hoje.year, hoje.month, d).weekday() < 5:
-            uteis += 1
-    return max(1, uteis)
-
 contas_df = pd.read_sql("SELECT * FROM contas", conn)
 trades_df = pd.read_sql("SELECT * FROM trades", conn)
 saques_df = pd.read_sql("SELECT * FROM saques", conn)
 ativos_df = pd.read_sql("SELECT nome FROM ativos ORDER BY nome ASC", conn)
 estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", conn)
+
+# --- FUNÇÃO AUXILIAR DE CÁLCULO MAM DINÂMICO ---
+def calcular_mam_conta(c, saldo_atual):
+    alvo = c["saldo_inicial"] + c["meta"]
+    falta_meta = max(0.0, alvo - saldo_atual)
+    prazo = c.get("prazo_avaliacao", "Sem prazo máximo (Indeterminado / Ylos)")
+    mesa_low = str(c.get("mesa", "")).strip().lower()
+
+    # Se for Ylos ou sem prazo -> MAM calculada no mês vigente (renovação automática todo mês)
+    if "ylos" in mesa_low or "sem prazo" in prazo.lower():
+        dias_uteis = dias_uteis_mes_atual()
+        mam = falta_meta / dias_uteis
+        info_txt = f"{dias_uteis} pregões neste mês (Mês renovável)"
+        dias_expira = None
+    elif "30 dias" in prazo:
+        dt_ini = datetime.strptime(c["data_inicio_janela"], "%Y-%m-%d").date() if c["data_inicio_janela"] else date.today()
+        dt_lim = dt_ini + timedelta(days=30)
+        dias_expira = (dt_lim - date.today()).days
+        dias_uteis = dias_uteis_ate_limite(dt_lim)
+        mam = falta_meta / max(1, dias_uteis)
+        info_txt = f"{dias_uteis} pregões até o prazo de 30 dias"
+    elif "60 dias" in prazo:
+        dt_ini = datetime.strptime(c["data_inicio_janela"], "%Y-%m-%d").date() if c["data_inicio_janela"] else date.today()
+        dt_lim = dt_ini + timedelta(days=60)
+        dias_expira = (dt_lim - date.today()).days
+        dias_uteis = dias_uteis_ate_limite(dt_lim)
+        mam = falta_meta / max(1, dias_uteis)
+        info_txt = f"{dias_uteis} pregões até o prazo de 60 dias"
+    else:
+        # Data Específica se formato YYYY-MM-DD
+        try:
+            dt_lim = datetime.strptime(prazo, "%Y-%m-%d").date()
+            dias_expira = (dt_lim - date.today()).days
+            dias_uteis = dias_uteis_ate_limite(dt_lim)
+            mam = falta_meta / max(1, dias_uteis)
+            info_txt = f"{dias_uteis} pregões até {fmt_data(prazo)}"
+        except:
+            dias_uteis = dias_uteis_mes_atual()
+            mam = falta_meta / dias_uteis
+            info_txt = f"{dias_uteis} pregões no mês"
+            dias_expira = None
+
+    return mam, falta_meta, info_txt, dias_expira
 
 # --- NAVEGAÇÃO LATERAL EM QUADRADOS ---
 if "menu" not in st.session_state:
@@ -270,7 +334,6 @@ if menu == "📊 Painel Geral":
         st.caption("Foco disciplinado: Evite inatividade de 7 dias e priorize contas que exigem performance.")
 
         hoje = date.today()
-        dias_uteis = dias_uteis_cme_restantes()
         status_contas = []
 
         for _, c in contas_df.iterrows():
@@ -285,14 +348,20 @@ if menu == "📊 Painel Geral":
 
             lucro_conta = t_conta["resultado"].sum() if not t_conta.empty else 0.0
             saldo_conta = c["saldo_inicial"] + lucro_conta
-            falta_meta = max(0.0, (c["saldo_inicial"] + c["meta"]) - saldo_conta)
-            mam = falta_meta / dias_uteis
+            
+            # Cálculo dinâmico MAM com renovação mensal ou prazo de mesa
+            mam, falta_meta, info_mam, dias_expira = calcular_mam_conta(c, saldo_conta)
 
             score = 0
             if dias_sem_operar >= 5:
                 score += 1500 + dias_sem_operar * 50
             elif dias_sem_operar >= 3:
                 score += 400 + dias_sem_operar * 20
+            
+            # Prioridade alta se tiver prazo fixo próximo de vencer (menos de 7 dias)
+            if dias_expira is not None and dias_expira <= 7:
+                score += 2000
+
             if not operou_hoje:
                 score += 100
             if falta_meta > 0 and c["meta"] > 0:
@@ -306,11 +375,14 @@ if menu == "📊 Painel Geral":
                 "tamanho": c["tamanho_conta"],
                 "tipo": c["tipo"],
                 "status": c.get("status", "Challenge (avaliação)"),
+                "prazo": c.get("prazo_avaliacao", "Sem prazo"),
                 "saldo_inicial": c["saldo_inicial"],
                 "saldo_atual": saldo_conta,
                 "pnl": lucro_conta,
                 "falta_meta": falta_meta,
                 "mam": mam,
+                "info_mam": info_mam,
+                "dias_expira": dias_expira,
                 "dias_sem_operar": dias_sem_operar,
                 "operou_hoje": operou_hoje,
                 "score": score
@@ -318,11 +390,21 @@ if menu == "📊 Painel Geral":
 
         df_radar = pd.DataFrame(status_contas).sort_values(by="score", ascending=False)
 
+        # Alerta de inatividade
         criticas = df_radar[df_radar["dias_sem_operar"] >= 5]
         if not criticas.empty:
             for _, cr in criticas.iterrows():
                 dias_txt = "Nunca operada" if cr["dias_sem_operar"] == 99 else f"{cr['dias_sem_operar']} dias sem trade"
-                st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** (Trader: {cr['trader']}) está a **{dias_txt}**! Opere hoje para evitar desclassificação.")
+                st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** está a **{dias_txt}**! Opere hoje para evitar desclassificação.")
+
+        # Alerta de prazo de aprovação para outras mesas (30 ou 60 dias)
+        expirando = df_radar[(df_radar["dias_expira"].notnull()) & (df_radar["dias_expira"] <= 7)]
+        if not expirando.empty:
+            for _, ex in expirando.iterrows():
+                if ex["dias_expira"] < 0:
+                    st.error(f"🚨 **PRAZO ESGOTADO:** A conta **{ex['identificador']}** ultrapassou o prazo máximo da mesa ({abs(ex['dias_expira'])} dias expirada)!")
+                else:
+                    st.warning(f"⏳ **PRAZO DE APROVAÇÃO ACABANDO:** Faltam apenas **{ex['dias_expira']} dias corridos** para expirar o prazo da conta **{ex['identificador']}**!")
 
         top3 = df_radar.head(3)
         cols = st.columns(3)
@@ -330,12 +412,13 @@ if menu == "📊 Painel Geral":
             with cols[i]:
                 titulo = "⭐ MÁXIMA ATENÇÃO: FOCO EM PERFORMANCE" if i == 0 else f"Opção #{i+1} do Dia"
                 st.markdown(f"#### {titulo}")
-                st.info(f"**{row['identificador']}**\n\n👤 Trader: `{row['trader']}` | Tam: `{row['tamanho']}`\n\n📌 Fase: `{row['status']}`")
+                st.info(f"**{row['identificador']}**\n\n👤 Trader: `{row['trader']}` | Tam: `{row['tamanho']}`\n\n📌 Prazo: `{row['prazo']}`")
                 
                 d_txt = "Nunca" if row['dias_sem_operar'] == 99 else f"{row['dias_sem_operar']} dias atrás"
                 st.write(f"🕒 **Última Operação:** {d_txt}")
                 st.metric("Saldo Atual", fmt_moeda(row['saldo_atual']), delta=fmt_moeda(row['pnl']))
-                st.metric(f"MAM ({dias_uteis} pregões CME)", f"{fmt_moeda(row['mam'])}/dia")
+                st.metric(f"MAM Diária", f"{fmt_moeda(row['mam'])}/dia")
+                st.caption(f"ℹ️ {row['info_mam']}")
 
         st.markdown("---")
         st.subheader("📋 Resumo Consolidado de Todas as Contas")
@@ -348,8 +431,8 @@ if menu == "📊 Painel Geral":
         df_tabela["MAM/Dia"] = df_tabela["mam"].apply(fmt_moeda)
 
         st.dataframe(
-            df_tabela[["identificador", "trader", "mesa", "tamanho", "tipo", "status", "Saldo Inicial", "Saldo Atual", "P&L Total", "Falta p/ Meta", "MAM/Dia"]].rename(
-                columns={"identificador": "Conta", "trader": "Trader", "mesa": "Mesa", "tamanho": "Tamanho", "tipo": "Tipo", "status": "Fase"}
+            df_tabela[["identificador", "trader", "mesa", "tamanho", "tipo", "status", "prazo", "Saldo Inicial", "Saldo Atual", "P&L Total", "Falta p/ Meta", "MAM/Dia"]].rename(
+                columns={"identificador": "Conta", "trader": "Trader", "mesa": "Mesa", "tamanho": "Tamanho", "tipo": "Tipo", "status": "Fase", "prazo": "Regra de Prazo"}
             ),
             use_container_width=True
         )
@@ -375,7 +458,7 @@ elif menu == "📁 Minhas Contas":
         is_financiada = status_atual in ["Funded (Financiada)", "Live (Real)"]
 
         st.title(f"📈 {c['nome']} — {c['mesa']}")
-        st.markdown(f"👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Modelo:** `{c['tipo']}` | **Fase:** `{status_atual}` | **Saques:** `{fmt_moeda(c['total_saques'])}`")
+        st.markdown(f"👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Modelo:** `{c['tipo']}` | **Fase:** `{status_atual}` | **Prazo:** `{c.get('prazo_avaliacao', 'Sem prazo')}`")
 
         if is_financiada:
             tab_painel, tab_lancar, tab_saques, tab_gerenciar = st.tabs([
@@ -392,15 +475,23 @@ elif menu == "📁 Minhas Contas":
             total_pnl = t_conta["resultado"].sum() if not t_conta.empty else 0.0
             saldo_atual = c["saldo_inicial"] + total_pnl
             drawdown_restante = saldo_atual - (c["saldo_inicial"] - c["max_dd"])
-            falta_meta = max(0.0, (c["saldo_inicial"] + c["meta"]) - saldo_atual)
-            dias_uteis = dias_uteis_cme_restantes()
-            mam_individual = falta_meta / dias_uteis
+            
+            # Cálculo MAM inteligente com renovação mensal
+            mam_individual, falta_meta, info_mam_ind, dias_expira_ind = calcular_mam_conta(c, saldo_atual)
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Saldo Atual", fmt_moeda(saldo_atual), delta=fmt_moeda(total_pnl))
             m2.metric("Margem até Stop da Mesa", fmt_moeda(drawdown_restante))
             m3.metric("Falta para o Alvo", fmt_moeda(falta_meta))
-            m4.metric(f"MAM ({dias_uteis} pregões CME)", f"{fmt_moeda(mam_individual)}/dia")
+            m4.metric("MAM Diária", f"{fmt_moeda(mam_individual)}/dia")
+            
+            st.caption(f"ℹ️ **Cálculo da MAM:** {info_mam_ind}")
+
+            if dias_expira_ind is not None:
+                if dias_expira_ind < 0:
+                    st.error(f"🚨 **Atenção:** O prazo de aprovação desta conta expirou há {abs(dias_expira_ind)} dias.")
+                elif dias_expira_ind <= 7:
+                    st.warning(f"⏳ **Prazo Apertado:** Restam apenas {dias_expira_ind} dias corridos para bater a meta antes do prazo da mesa.")
 
             st.markdown("---")
 
@@ -430,7 +521,7 @@ elif menu == "📁 Minhas Contas":
             else:
                 st.info("Nenhuma operação registrada para esta conta ainda.")
 
-        # --- ABA 2: LANÇAR TRADE COM PONTOS, CUSTOS E DIREÇÃO ---
+        # --- ABA 2: LANÇAR TRADE ---
         with tab_lancar:
             st.subheader(f"Registrar Operação: {c['nome']} ({c['mesa']})")
 
@@ -482,7 +573,6 @@ elif menu == "📁 Minhas Contas":
                         t_dados = t_conta_edit[t_conta_edit["id"] == t_id].iloc[0]
 
                         ed_data = st.date_input("Data", value=datetime.strptime(t_dados["data"], "%Y-%m-%d").date(), format="DD/MM/YYYY", key=f"ed_d_{t_id}")
-                        
                         idx_ativo = ativos_df["nome"].tolist().index(t_dados["ativo"]) if t_dados["ativo"] in ativos_df["nome"].tolist() else 0
                         ed_ativo = st.selectbox("Ativo", ativos_df["nome"].tolist(), index=idx_ativo, key=f"ed_atv_{t_id}")
 
@@ -679,11 +769,11 @@ elif menu == "📁 Minhas Contas":
                         use_container_width=True
                     )
 
-        # --- ABA DE OPÇÕES DA CONTA (EDITAR CUSTOS & DADOS) ---
+        # --- ABA DE OPÇÕES DA CONTA (EDITAR PRAZO, CUSTOS & DADOS) ---
         with tab_gerenciar:
             st.subheader(f"⚙️ Configurações da Conta: {c['nome']} ({c['mesa']})")
             
-            with st.expander("✏️ Editar Dados e Custos Desta Conta", expanded=True):
+            with st.expander("✏️ Editar Dados, Prazo e Custos Desta Conta", expanded=True):
                 with st.form("form_editar_conta_atual"):
                     c1_ed, c2_ed = st.columns(2)
                     with c1_ed:
@@ -704,6 +794,15 @@ elif menu == "📁 Minhas Contas":
                         idx_status = status_opcoes.index(status_salvo) if status_salvo in status_opcoes else 0
                         ed_status = st.selectbox("Fase / Status da Conta", status_opcoes, index=idx_status)
 
+                        prazo_opcoes = [
+                            "Sem prazo máximo (Indeterminado / Ylos)",
+                            "30 dias corridos",
+                            "60 dias corridos"
+                        ]
+                        prazo_salvo = c.get('prazo_avaliacao', 'Sem prazo máximo (Indeterminado / Ylos)')
+                        idx_prazo = prazo_opcoes.index(prazo_salvo) if prazo_salvo in prazo_opcoes else 0
+                        ed_prazo = st.selectbox("Regra de Prazo de Aprovação", prazo_opcoes, index=idx_prazo)
+
                     with c2_ed:
                         ed_saldo = st.text_input("Saldo Inicial ($)", value=fmt_br_input(c['saldo_inicial']))
                         ed_dd = st.text_input("Drawdown Máximo ($)", value=fmt_br_input(c['max_dd']))
@@ -717,13 +816,13 @@ elif menu == "📁 Minhas Contas":
                         ed_c_outros = st.text_input("Outros Custos ($)", value=fmt_br_input(c.get('outros_custos', 0.0)))
 
                         dt_janela_val = datetime.strptime(c['data_inicio_janela'], "%Y-%m-%d").date() if c['data_inicio_janela'] else date.today()
-                        ed_dt_janela = st.date_input("Início da Janela de Saque", value=dt_janela_val, format="DD/MM/YYYY")
+                        ed_dt_janela = st.date_input("Início da Janela / Operações", value=dt_janela_val, format="DD/MM/YYYY")
 
                     salvar_ed_conta = st.form_submit_button("💾 Salvar Alterações da Conta")
                     if salvar_ed_conta:
                         try:
                             cursor.execute("""
-                            UPDATE contas SET nome=?, trader=?, mesa=?, tamanho_conta=?, tipo=?, status=?, saldo_inicial=?, max_dd=?, limite_diario=?, meta=?, custo_mesa=?, custo_ativacao=?, custo_reset=?, outros_custos=?, data_inicio_janela=?
+                            UPDATE contas SET nome=?, trader=?, mesa=?, tamanho_conta=?, tipo=?, status=?, saldo_inicial=?, max_dd=?, limite_diario=?, meta=?, custo_mesa=?, custo_ativacao=?, custo_reset=?, outros_custos=?, data_inicio_janela=?, prazo_avaliacao=?
                             WHERE id=?
                             """, (
                                 ed_nome, ed_trader, ed_mesa, ed_tamanho, ed_tipo, ed_status,
@@ -736,11 +835,12 @@ elif menu == "📁 Minhas Contas":
                                 converter_br_para_float(ed_c_reset),
                                 converter_br_para_float(ed_c_outros),
                                 str(ed_dt_janela),
+                                ed_prazo,
                                 c_id
                             ))
                             conn.commit()
                             st.toast("Atualizado", icon="✅")
-                            st.success("Dados e status da conta atualizados com sucesso!")
+                            st.success("Dados e prazo da conta atualizados com sucesso!")
                             st.rerun()
                         except Exception as e:
                             st.toast("Erro, e tente novamente", icon="❌")
@@ -852,7 +952,7 @@ elif menu == "💰 Relatório Financeiro":
         st.plotly_chart(fig_bar, use_container_width=True)
 
 # =========================================================
-# 4. REGRAS E COMPLIANCE DA MESA (MOTOR OFICIAL YLOS TRADING)
+# 4. REGRAS E COMPLIANCE DA MESA
 # =========================================================
 elif menu == "🛡️ Regras e Compliance":
     st.title("🛡️ Auditoria de Regras & Compliance")
@@ -878,7 +978,7 @@ elif menu == "🛡️ Regras e Compliance":
             t_janela = t_all.copy()
 
         st.markdown(f"### Conta: `{c_info['nome']}` | Mesa: `{c_info['mesa']}` | Modelo: `{tipo_conta}` | Fase: `{status_conta}`")
-        st.write(f"**Total em Saques:** `{fmt_moeda(c_info['total_saques'])}` | **Janela Atual Iniciada em:** `{fmt_data(c_info['data_inicio_janela'])}`")
+        st.write(f"**Total em Saques:** `{fmt_moeda(c_info['total_saques'])}` | **Janela Atual Iniciada em:** `{fmt_data(c_info['data_inicio_janela'])}` | **Regra de Prazo:** `{c_info.get('prazo_avaliacao', 'Sem prazo')}`")
         st.markdown("---")
 
         # 1. CONSISTÊNCIA DE SALDO
@@ -1107,13 +1207,12 @@ elif menu == "💾 Backup":
                     st.error(f"Erro ao processar arquivo de restauração: {str(ex)}")
 
 # =========================================================
-# 6. CADASTRAR NOVA CONTA (COM AUTO-PREENCHIMENTO DE SALDO)
+# 6. CADASTRAR NOVA CONTA (COM SELETOR DE PRAZO & AUTO-SALDO)
 # =========================================================
 elif menu == "➕ Cadastrar":
     st.title("➕ Cadastrar Nova Conta")
-    st.caption("Cadastre novas contas. O saldo inicial é preenchido proporcionalmente de forma automática conforme o tamanho da conta escolhido.")
+    st.caption("Cadastre novas contas. O saldo inicial é preenchido proporcionalmente ao tamanho escolhido, e o prazo para aprovação adapta o cálculo da MAM.")
 
-    # MAPEAMENTO INTELIGENTE DE TAMANHO PARA SALDO INICIAL
     MAPA_TAMANHO_SALDO = {
         "25k": "25.000,00",
         "50k": "50.000,00",
@@ -1181,6 +1280,17 @@ elif menu == "➕ Cadastrar":
             ["Challenge (avaliação)", "Funded (Financiada)", "Live (Real)"],
             index=None,
             placeholder="Selecione a Fase..."
+        )
+
+        # Regra de Prazo de Aprovação da Mesa
+        prazo_avaliacao = st.selectbox(
+            "Regra de Prazo de Aprovação da Mesa",
+            [
+                "Sem prazo máximo (Indeterminado / Ylos)",
+                "30 dias corridos",
+                "60 dias corridos"
+            ],
+            help="Na Ylos, selecione 'Sem prazo máximo'. Em mesas com tempo limite, escolha 30 ou 60 dias para a MAM calcular o ritmo diário correto até o vencimento."
         )
 
     with c2:
@@ -1252,9 +1362,9 @@ elif menu == "➕ Cadastrar":
                 c_outros = converter_br_para_float(outros_custos_str) if outros_custos_str.strip() else 0.0
 
                 cursor.execute("""
-                INSERT INTO contas (nome, trader, mesa, tamanho_conta, tipo, status, saldo_inicial, max_dd, limite_diario, meta, custo_mesa, custo_ativacao, custo_reset, outros_custos, total_saques, data_inicio_janela)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?)
-                """, (nome, trader, mesa, tam_final, tipo, status, s_ini, m_dd, l_dia, meta_val, c_mesa, c_ativ, c_reset, c_outros, str(data_inicio)))
+                INSERT INTO contas (nome, trader, mesa, tamanho_conta, tipo, status, saldo_inicial, max_dd, limite_diario, meta, custo_mesa, custo_ativacao, custo_reset, outros_custos, total_saques, data_inicio_janela, prazo_avaliacao)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?)
+                """, (nome, trader, mesa, tam_final, tipo, status, s_ini, m_dd, l_dia, meta_val, c_mesa, c_ativ, c_reset, c_outros, str(data_inicio), prazo_avaliacao))
                 conn.commit()
                 
                 st.toast("Atualizado", icon="✅")
