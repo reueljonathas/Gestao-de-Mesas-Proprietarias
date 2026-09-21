@@ -29,7 +29,7 @@ def fmt_data(data_str):
         return str(data_str)
 
 def converter_br_para_float(texto):
-    """Converte '50.000,00' ou '-250,50' para float float padrão"""
+    """Converte '50.000,00' ou '-250,50' para float padrão"""
     if not texto:
         return 0.0
     limpo = str(texto).replace("R$", "").replace("$", "").strip()
@@ -109,7 +109,7 @@ estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", c
 st.sidebar.title("Navegação")
 menu = st.sidebar.radio(
     "Ir para:",
-    ["📊 Painel Geral", "📁 Minhas Contas", "🛡️ Regras e Compliance", "⚙️ Gerenciar Contas & Ativos"]
+    ["📊 Painel Geral", "📁 Minhas Contas", "🛡️ Regras e Compliance", "➕ Cadastrar"]
 )
 
 # =========================================================
@@ -119,7 +119,7 @@ if menu == "📊 Painel Geral":
     st.title("📊 Painel Geral Consolidado")
     
     if contas_df.empty:
-        st.info("👋 Nenhuma conta cadastrada ainda. Acesse **'⚙️ Gerenciar Contas & Ativos'** para começar!")
+        st.info("👋 Nenhuma conta cadastrada ainda. Acesse **'➕ Cadastrar'** para começar!")
     else:
         total_saldo_inicial = contas_df["saldo_inicial"].sum()
         total_lucro_global = trades_df["resultado"].sum() if not trades_df.empty else 0.0
@@ -190,7 +190,7 @@ if menu == "📊 Painel Geral":
         if not criticas.empty:
             for _, cr in criticas.iterrows():
                 dias_txt = "Nunca operada" if cr["dias_sem_operar"] == 99 else f"{cr['dias_sem_operar']} dias sem trade"
-                st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** (Trader: {cr['trader']}) está a **{dias_txt}**! Opere hoje para não quebrar a regra de inatividade.")
+                st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** (Trader: {cr['trader']}) está a **{dias_txt}**! Opere hoje para evitar desclassificação.")
 
         top3 = df_radar.head(3)
         cols = st.columns(3)
@@ -223,12 +223,12 @@ if menu == "📊 Painel Geral":
         )
 
 # =========================================================
-# 2. MINHAS CONTAS (PAINEL INDIVIDUAL & LANÇAMENTO DE TRADES)
+# 2. MINHAS CONTAS (PAINEL, TRADES, ATIVOS E ESTRATÉGIAS)
 # =========================================================
 elif menu == "📁 Minhas Contas":
     if contas_df.empty:
         st.title("📁 Minhas Contas")
-        st.warning("Cadastre suas contas na aba '⚙️ Gerenciar Contas & Ativos' primeiro.")
+        st.warning("Cadastre suas contas na aba '➕ Cadastrar' primeiro.")
     else:
         lista_opcoes = [
             f"{c['id']} - {c['nome']} — {c['mesa']} ({c['tamanho_conta']}) | Trader: {c['trader']}"
@@ -242,10 +242,9 @@ elif menu == "📁 Minhas Contas":
         st.title(f"📈 {c['nome']} — {c['mesa']}")
         st.markdown(f"👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Tipo:** `{c['tipo']}` | **Saques Totais:** `{fmt_moeda(c['total_saques'])}`")
 
-        # Abas internas da própria conta
-        tab_painel, tab_lancar = st.tabs(["📊 Desempenho da Conta", "➕ Lançar Trade Nesta Conta"])
+        tab_painel, tab_lancar, tab_gerenciar = st.tabs(["📊 Desempenho da Conta", "➕ Lançar Trade Nesta Conta", "⚙️ Opções da Conta"])
 
-        # --- ABA 1: DESEMPENHO E GRÁFICO ---
+        # --- ABA 1: DESEMPENHO E HISTÓRICO ---
         with tab_painel:
             t_conta = trades_df[trades_df["conta_id"] == c_id].copy()
             total_pnl = t_conta["resultado"].sum() if not t_conta.empty else 0.0
@@ -285,12 +284,49 @@ elif menu == "📁 Minhas Contas":
                 csv = t_conta.to_csv(index=False).encode('utf-8')
                 st.download_button("📥 Baixar Histórico de Trades (CSV)", csv, f"trades_{c['nome']}.csv", "text/csv")
             else:
-                st.info("Nenhuma operação registrada para esta conta ainda. Use a aba ao lado '➕ Lançar Trade Nesta Conta' para registrar seu primeiro trade.")
+                st.info("Nenhuma operação registrada para esta conta ainda.")
 
-        # --- ABA 2: LANÇAR TRADE DIRETO NA CONTA ---
+        # --- ABA 2: LANÇAR TRADE + ADICIONAR ATIVOS E ESTRATÉGIAS ---
         with tab_lancar:
-            st.subheader(f"Registrar Operação para: {c['nome']} ({c['mesa']})")
-            
+            st.subheader(f"Registrar Operação: {c['nome']} ({c['mesa']})")
+
+            # ÁREA RÁPIDA PARA ADICIONAR ATIVOS OU ESTRATÉGIAS
+            with st.expander("⚡ Adicionar Novo Ativo ou Nova Estratégia Rapidamente", expanded=False):
+                col_novo_atv, col_nova_est = st.columns(2)
+                
+                with col_novo_atv:
+                    st.markdown("**Novo Ativo**")
+                    nome_novo_ativo = st.text_input("Símbolo/Ativo (ex: MNQ, 6E, ZB, BTC)", key="input_novo_ativo")
+                    if st.button("➕ Inserir Ativo", key="btn_inserir_ativo"):
+                        if nome_novo_ativo:
+                            try:
+                                cursor.execute("INSERT INTO ativos (nome) VALUES (?)", (nome_novo_ativo.strip(),))
+                                conn.commit()
+                                st.toast("Atualizado", icon="✅")
+                                st.success(f"Ativo '{nome_novo_ativo}' adicionado com sucesso!")
+                                st.rerun()
+                            except Exception:
+                                st.toast("Erro, e tente novamente", icon="❌")
+                                st.error("Este ativo já existe.")
+
+                with col_nova_est:
+                    st.markdown("**Nova Estratégia**")
+                    nome_nova_est = st.text_input("Estratégia (ex: FVG, Order Block, Rompimento M15)", key="input_nova_est")
+                    if st.button("➕ Inserir Estratégia", key="btn_inserir_estrategia"):
+                        if nome_nova_est:
+                            try:
+                                cursor.execute("INSERT INTO estrategias (nome) VALUES (?)", (nome_nova_est.strip(),))
+                                conn.commit()
+                                st.toast("Atualizado", icon="✅")
+                                st.success(f"Estratégia '{nome_nova_est}' adicionada com sucesso!")
+                                st.rerun()
+                            except Exception:
+                                st.toast("Erro, e tente novamente", icon="❌")
+                                st.error("Esta estratégia já existe.")
+
+            st.markdown("---")
+
+            # FORMULÁRIO DO TRADE
             with st.form("form_trade_conta"):
                 c1, c2, c3 = st.columns(3)
                 with c1:
@@ -301,7 +337,7 @@ elif menu == "📁 Minhas Contas":
                     resultado_str = st.text_input("Resultado Líquido ($) (ex: 250,00 ou -150,00)", value="0,00")
                 with c3:
                     duracao = st.number_input("Duração da Operação (Minutos)", min_value=1, value=15, step=1)
-                    estrategia = st.selectbox("Estratégia", estrategias_df["nome"].tolist())
+                    estrategia = st.selectbox("Estratégia Utilizada", estrategias_df["nome"].tolist())
 
                 notas = st.text_area("Observações Técnicas / Psicológicas do Trade")
                 salvar_trade = st.form_submit_button("Salvar Operação Nesta Conta")
@@ -320,6 +356,27 @@ elif menu == "📁 Minhas Contas":
                     except Exception:
                         st.toast("Erro, e tente novamente", icon="❌")
                         st.error("Erro, e tente novamente. Verifique se digitou os valores corretamente.")
+
+        # --- ABA 3: EXCLUIR CONTA SELECIONADA ---
+        with tab_gerenciar:
+            st.subheader("Gerenciamento Desta Conta")
+            st.warning(f"Você está na conta: **{c['nome']} ({c['mesa']})**")
+            
+            confirmar_del = st.checkbox(f"⚠️ Confirmo que desejo apagar definitivamente a conta '{c['nome']}' e todos os seus trades.")
+            if st.button("🗑️ Excluir Esta Conta Definitivamente"):
+                if confirmar_del:
+                    try:
+                        cursor.execute("DELETE FROM trades WHERE conta_id = ?", (c_id,))
+                        cursor.execute("DELETE FROM contas WHERE id = ?", (c_id,))
+                        conn.commit()
+                        st.toast("Atualizado", icon="✅")
+                        st.success("Conta removida com sucesso!")
+                        st.rerun()
+                    except Exception:
+                        st.toast("Erro, e tente novamente", icon="❌")
+                        st.error("Erro, e tente novamente ao excluir.")
+                else:
+                    st.warning("Marque a caixa de confirmação para prosseguir.")
 
 # =========================================================
 # 3. REGRAS E COMPLIANCE DA MESA
@@ -415,113 +472,54 @@ elif menu == "🛡️ Regras e Compliance":
                 st.success("✅ **REGRA APROVADA:** Volume de contratos homogêneo.")
 
 # =========================================================
-# 4. GERENCIAR CONTAS & ATIVOS
+# 4. CADASTRAR (APENAS NOVAS CONTAS)
 # =========================================================
-elif menu == "⚙️ Gerenciar Contas & Ativos":
-    st.title("⚙️ Gerenciamento e Ativos")
+elif menu == "➕ Cadastrar":
+    st.title("➕ Cadastrar Nova Conta")
+    st.caption("Cadastre aqui apenas novas contas de mesas proprietárias que ainda não constam no sistema.")
 
-    with st.expander("➕ Cadastrar Nova Conta de Mesa", expanded=True):
-        with st.form("nova_conta"):
-            c1, c2 = st.columns(2)
-            with c1:
-                nome = st.text_input("Identificação da Conta (ex: Apex 50k #1)")
-                trader = st.text_input("Nome do Trader Responsável", value="Trader Principal")
-                mesa = st.text_input("Nome da Mesa (ex: Ylos Trading, Mide Global, Apex)")
-                tamanho_conta = st.selectbox("Tamanho da Conta", ["25k", "50k", "100k", "150k", "250k", "300k", "Outro"])
-                tipo = st.selectbox("Tipo de Conta", [
-                    "Challenge (Avaliação)",
-                    "No Activation",
-                    "Standard / Master",
-                    "Instant Funding / Freedom"
-                ])
-            with c2:
-                saldo_str = st.text_input("Saldo Inicial ($)", value="50.000,00")
-                max_dd_str = st.text_input("Drawdown Máximo Permitido ($)", value="2.500,00")
-                limite_diario_str = st.text_input("Limite Diário de Perda ($)", value="1.000,00")
-                meta_str = st.text_input("Meta de Lucro ($)", value="3.000,00")
-                total_saques_str = st.text_input("Total em Saques Já Aprovados ($)", value="0,00")
-                data_inicio = st.date_input("Início da Janela de Saque", value=date.today(), format="DD/MM/YYYY")
+    with st.form("form_cadastrar_conta"):
+        c1, c2 = st.columns(2)
+        with c1:
+            nome = st.text_input("Identificação da Conta (ex: Apex 50k #1)")
+            trader = st.text_input("Nome do Trader Responsável", value="Trader Principal")
+            mesa = st.text_input("Nome da Mesa (ex: Ylos Trading, Mide Global, Apex)")
+            tamanho_conta = st.selectbox("Tamanho da Conta", ["25k", "50k", "100k", "150k", "250k", "300k", "Outro"])
+            tipo = st.selectbox("Tipo de Conta", [
+                "Challenge (Avaliação)",
+                "No Activation",
+                "Standard / Master",
+                "Instant Funding / Freedom"
+            ])
+        with c2:
+            saldo_str = st.text_input("Saldo Inicial ($)", value="50.000,00")
+            max_dd_str = st.text_input("Drawdown Máximo Permitido ($)", value="2.500,00")
+            limite_diario_str = st.text_input("Limite Diário de Perda ($)", value="1.000,00")
+            meta_str = st.text_input("Meta de Lucro ($)", value="3.000,00")
+            total_saques_str = st.text_input("Total em Saques Já Aprovados ($)", value="0,00")
+            data_inicio = st.date_input("Início da Janela de Saque", value=date.today(), format="DD/MM/YYYY")
 
-            salvar = st.form_submit_button("Cadastrar Conta")
-            if salvar:
-                try:
-                    if not nome or not mesa:
-                        raise ValueError("Preencha nome e mesa.")
-                    
-                    s_ini = converter_br_para_float(saldo_str)
-                    m_dd = converter_br_para_float(max_dd_str)
-                    l_dia = converter_br_para_float(limite_diario_str)
-                    meta_val = converter_br_para_float(meta_str)
-                    saques_val = converter_br_para_float(total_saques_str)
+        salvar = st.form_submit_button("Cadastrar Nova Conta")
+        if salvar:
+            try:
+                if not nome or not mesa:
+                    raise ValueError("Preencha nome e mesa.")
+                
+                s_ini = converter_br_para_float(saldo_str)
+                m_dd = converter_br_para_float(max_dd_str)
+                l_dia = converter_br_para_float(limite_diario_str)
+                meta_val = converter_br_para_float(meta_str)
+                saques_val = converter_br_para_float(total_saques_str)
 
-                    cursor.execute("""
-                    INSERT INTO contas (nome, trader, mesa, tamanho_conta, tipo, saldo_inicial, max_dd, limite_diario, meta, total_saques, data_inicio_janela)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (nome, trader, mesa, tamanho_conta, tipo, s_ini, m_dd, l_dia, meta_val, saques_val, str(data_inicio)))
-                    conn.commit()
-                    
-                    st.toast("Atualizado", icon="✅")
-                    st.success("Conta cadastrada com sucesso!")
-                    st.rerun()
-                except Exception:
-                    st.toast("Erro, e tente novamente", icon="❌")
-                    st.error("Erro, e tente novamente. Verifique se os números foram digitados corretamente.")
-
-    st.markdown("---")
-    st.subheader("🎯 Personalizar Ativos e Estratégias")
-    col_atv, col_est = st.columns(2)
-
-    with col_atv:
-        st.markdown("**Adicionar Novo Ativo**")
-        novo_ativo = st.text_input("Símbolo / Nome (ex: 6E, ZB, BTC)")
-        if st.button("➕ Adicionar Ativo"):
-            if novo_ativo:
-                try:
-                    cursor.execute("INSERT INTO ativos (nome) VALUES (?)", (novo_ativo.strip(),))
-                    conn.commit()
-                    st.toast("Atualizado", icon="✅")
-                    st.success(f"Ativo '{novo_ativo}' adicionado!")
-                    st.rerun()
-                except Exception:
-                    st.toast("Erro, e tente novamente", icon="❌")
-                    st.error("Erro, e tente novamente. Esse ativo já pode existir.")
-        st.write("Ativos atuais:", ", ".join(ativos_df["nome"].tolist()))
-
-    with col_est:
-        st.markdown("**Adicionar Nova Estratégia**")
-        nova_est = st.text_input("Nome da Estratégia (ex: FVG, Order Block)")
-        if st.button("➕ Adicionar Estratégia"):
-            if nova_est:
-                try:
-                    cursor.execute("INSERT INTO estrategias (nome) VALUES (?)", (nova_est.strip(),))
-                    conn.commit()
-                    st.toast("Atualizado", icon="✅")
-                    st.success(f"Estratégia '{nova_est}' adicionada!")
-                    st.rerun()
-                except Exception:
-                    st.toast("Erro, e tente novamente", icon="❌")
-                    st.error("Erro, e tente novamente. Essa estratégia já pode existir.")
-        st.write("Estratégias atuais:", ", ".join(estrategias_df["nome"].tolist()))
-
-    if not contas_df.empty:
-        st.markdown("---")
-        st.subheader("🗑️ Excluir Conta")
-        lista_del = [f"{c['id']} - {c['nome']} ({c['mesa']}) | Trader: {c['trader']}" for _, c in contas_df.iterrows()]
-        conta_a_apagar = st.selectbox("Selecione a conta para apagar:", lista_del)
-        id_apagar = int(conta_a_apagar.split(" - ")[0])
-
-        confirmar = st.checkbox("⚠️ Confirmo que desejo apagar esta conta e todos os trades dela.")
-        if st.button("Excluir Conta Definitivamente"):
-            if confirmar:
-                try:
-                    cursor.execute("DELETE FROM trades WHERE conta_id = ?", (id_apagar,))
-                    cursor.execute("DELETE FROM contas WHERE id = ?", (id_apagar,))
-                    conn.commit()
-                    st.toast("Atualizado", icon="✅")
-                    st.success("Conta removida com sucesso!")
-                    st.rerun()
-                except Exception:
-                    st.toast("Erro, e tente novamente", icon="❌")
-                    st.error("Erro, e tente novamente ao excluir.")
-            else:
-                st.warning("Marque a caixa de confirmação para prosseguir.")
+                cursor.execute("""
+                INSERT INTO contas (nome, trader, mesa, tamanho_conta, tipo, saldo_inicial, max_dd, limite_diario, meta, total_saques, data_inicio_janela)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (nome, trader, mesa, tamanho_conta, tipo, s_ini, m_dd, l_dia, meta_val, saques_val, str(data_inicio)))
+                conn.commit()
+                
+                st.toast("Atualizado", icon="✅")
+                st.success("Conta cadastrada com sucesso!")
+                st.rerun()
+            except Exception:
+                st.toast("Erro, e tente novamente", icon="❌")
+                st.error("Erro, e tente novamente. Verifique se digitou os dados corretamente.")
