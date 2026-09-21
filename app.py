@@ -19,6 +19,15 @@ def fmt_moeda(valor):
     formatado = f"{val_abs:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{sinal}$ {formatado}"
 
+def fmt_br_input(valor):
+    """Formata float para texto de input: 50.000,00"""
+    if valor is None or pd.isna(valor):
+        return "0,00"
+    sinal = "-" if valor < 0 else ""
+    val_abs = abs(float(valor))
+    formatado = f"{val_abs:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{sinal}{formatado}"
+
 def fmt_data(data_str):
     """Formata no padrão DD/MM/AAAA"""
     if not data_str or pd.isna(data_str):
@@ -49,8 +58,30 @@ def formatar_duracao(h, m, s):
     partes.append(f"{s}s")
     return " ".join(partes)
 
+def descompactar_duracao(dur_str):
+    """Lê '1h 20m 15s' e devolve (1, 20, 15)"""
+    h, m, s = 0, 0, 0
+    if not dur_str or pd.isna(dur_str):
+        return 0, 0, 0
+    dur_str = str(dur_str)
+    partes = dur_str.split()
+    for p in partes:
+        if p.endswith("h"):
+            try: h = int(p.replace("h", ""))
+            except: pass
+        elif p.endswith("m"):
+            try: m = int(p.replace("m", ""))
+            except: pass
+        elif p.endswith("s"):
+            try: s = int(p.replace("s", ""))
+            except: pass
+    if not any(c in dur_str for c in ["h", "m", "s"]):
+        try: m = int(dur_str)
+        except: pass
+    return h, m, s
+
 def parse_display_duracao(val):
-    """Formata tanto trades antigos (só minutos) quanto os novos (h, m, s)"""
+    """Formata trades antigos e novos"""
     if val is None or pd.isna(val):
         return "-"
     s_val = str(val)
@@ -265,7 +296,6 @@ elif menu == "📁 Minhas Contas":
         st.title(f"📈 {c['nome']} — {c['mesa']}")
         st.markdown(f"👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Tipo:** `{c['tipo']}` | **Saques Totais:** `{fmt_moeda(c['total_saques'])}`")
 
-        # Aba renomeada para "➕ Lançar Trade"
         tab_painel, tab_lancar, tab_gerenciar = st.tabs(["📊 Desempenho da Conta", "➕ Lançar Trade", "⚙️ Opções da Conta"])
 
         # --- ABA 1: DESEMPENHO E HISTÓRICO ---
@@ -301,9 +331,9 @@ elif menu == "📁 Minhas Contas":
                 t_view["Duração"] = t_view["duracao_min"].apply(parse_display_duracao)
 
                 st.dataframe(
-                    t_view[["Data", "ativo", "lotes", "Resultado", "Duração", "estrategia", "notas"]].rename(
-                        columns={"ativo": "Ativo", "lotes": "Lotes", "estrategia": "Estratégia", "notas": "Notas"}
-                    ).sort_values(by="Data", ascending=False),
+                    t_view[["id", "Data", "ativo", "lotes", "Resultado", "Duração", "estrategia", "notas"]].rename(
+                        columns={"id": "ID", "ativo": "Ativo", "lotes": "Lotes", "estrategia": "Estratégia", "notas": "Notas"}
+                    ).sort_values(by="ID", ascending=False),
                     use_container_width=True
                 )
                 csv = t_conta.to_csv(index=False).encode('utf-8')
@@ -311,7 +341,7 @@ elif menu == "📁 Minhas Contas":
             else:
                 st.info("Nenhuma operação registrada para esta conta ainda.")
 
-        # --- ABA 2: LANÇAR TRADE (CAMPOS TOTALMENTE NEUTROS / LIMPOS) ---
+        # --- ABA 2: LANÇAR TRADE + EDIÇÃO NO RODAPÉ ---
         with tab_lancar:
             st.subheader(f"Registrar Operação: {c['nome']} ({c['mesa']})")
 
@@ -337,13 +367,80 @@ elif menu == "📁 Minhas Contas":
 
             notas = st.text_area("Observações Técnicas / Psicológicas do Trade", placeholder="Descreva os motivos da entrada, gatilho, disciplina ou erros...")
 
-            st.write("") # Espaçamento
+            st.write("")
 
-            # BOTÕES LADO A LADO: SALVAR | NOVO ATIVO | NOVA ESTRATÉGIA
-            col_salvar, col_add_ativo, col_add_est = st.columns([1, 1.2, 1.2])
+            # BOTÕES LADO A LADO: SALVAR | EDITAR TRADE | NOVO ATIVO | NOVA ESTRATÉGIA
+            col_salvar, col_edit, col_add_ativo, col_add_est = st.columns([1, 1.2, 1.2, 1.2])
 
             with col_salvar:
                 btn_salvar = st.button("💾 Salvar", type="primary", use_container_width=True)
+
+            # POPOVER DE EDIÇÃO DE TRADE
+            with col_edit:
+                with st.popover("✏️ Editar Trade", use_container_width=True):
+                    st.markdown("### ✏️ Alterar Trade Já Lançado")
+                    t_conta_edit = trades_df[trades_df["conta_id"] == c_id]
+                    if t_conta_edit.empty:
+                        st.info("Nenhum trade lançado nesta conta para editar.")
+                    else:
+                        lista_trades_edit = [
+                            f"ID {t['id']} | {fmt_data(t['data'])} - {t['ativo']} ({fmt_moeda(t['resultado'])})"
+                            for _, t in t_conta_edit.sort_values(by="id", ascending=False).iterrows()
+                        ]
+                        trade_selecionado = st.selectbox("Selecione a Operação:", lista_trades_edit, key="sel_trade_edit")
+                        t_id = int(trade_selecionado.split(" | ")[0].replace("ID ", ""))
+                        t_dados = t_conta_edit[t_conta_edit["id"] == t_id].iloc[0]
+
+                        # Campos para editar
+                        ed_data = st.date_input("Data", value=datetime.strptime(t_dados["data"], "%Y-%m-%d").date(), format="DD/MM/YYYY", key=f"ed_d_{t_id}")
+                        
+                        idx_ativo = ativos_df["nome"].tolist().index(t_dados["ativo"]) if t_dados["ativo"] in ativos_df["nome"].tolist() else 0
+                        ed_ativo = st.selectbox("Ativo", ativos_df["nome"].tolist(), index=idx_ativo, key=f"ed_atv_{t_id}")
+
+                        ed_lotes = st.number_input("Lotes", min_value=0.1, value=float(t_dados["lotes"]), step=0.5, key=f"ed_lot_{t_id}")
+                        ed_res_str = st.text_input("Resultado ($)", value=fmt_br_input(t_dados["resultado"]), key=f"ed_res_{t_id}")
+
+                        h_ant, m_ant, s_ant = descompactar_duracao(t_dados["duracao_min"])
+                        st.caption("Duração:")
+                        ed_c1, ed_c2, ed_c3 = st.columns(3)
+                        with ed_c1:
+                            ed_h = st.number_input("Horas", min_value=0, max_value=72, value=h_ant, step=1, key=f"ed_h_{t_id}")
+                        with ed_c2:
+                            ed_m = st.number_input("Min", min_value=0, max_value=59, value=m_ant, step=1, key=f"ed_m_{t_id}")
+                        with ed_c3:
+                            ed_s = st.number_input("Seg", min_value=0, max_value=59, value=s_ant, step=1, key=f"ed_s_{t_id}")
+
+                        idx_est = estrategias_df["nome"].tolist().index(t_dados["estrategia"]) if t_dados["estrategia"] in estrategias_df["nome"].tolist() else 0
+                        ed_est = st.selectbox("Estratégia", estrategias_df["nome"].tolist(), index=idx_est, key=f"ed_est_{t_id}")
+
+                        ed_notas = st.text_area("Observações", value=str(t_dados["notas"] or ""), key=f"ed_not_{t_id}")
+
+                        col_btn_upd, col_btn_del = st.columns(2)
+                        with col_btn_upd:
+                            if st.button("💾 Atualizar Trade", key=f"btn_save_tr_{t_id}"):
+                                try:
+                                    res_f = converter_br_para_float(ed_res_str)
+                                    dur_str = formatar_duracao(ed_h, ed_m, ed_s)
+                                    cursor.execute("""
+                                    UPDATE trades SET data=?, ativo=?, lotes=?, resultado=?, duracao_min=?, estrategia=?, notas=?
+                                    WHERE id=?
+                                    """, (str(ed_data), ed_ativo, ed_lotes, res_f, dur_str, ed_est, ed_notas, t_id))
+                                    conn.commit()
+                                    st.toast("Atualizado", icon="✅")
+                                    st.success("Trade atualizado com sucesso!")
+                                    st.rerun()
+                                except Exception:
+                                    st.toast("Erro, e tente novamente", icon="❌")
+                        with col_btn_del:
+                            if st.button("🗑️ Excluir Este Trade", key=f"btn_del_tr_{t_id}"):
+                                try:
+                                    cursor.execute("DELETE FROM trades WHERE id=?", (t_id,))
+                                    conn.commit()
+                                    st.toast("Atualizado", icon="✅")
+                                    st.success("Trade excluído com sucesso!")
+                                    st.rerun()
+                                except Exception:
+                                    st.toast("Erro, e tente novamente", icon="❌")
 
             with col_add_ativo:
                 with st.popover("➕ Novo Ativo", use_container_width=True):
@@ -377,7 +474,7 @@ elif menu == "📁 Minhas Contas":
                                 st.toast("Erro, e tente novamente", icon="❌")
                                 st.error("Esta estratégia já existe.")
 
-            # Processamento com Validações
+            # Processamento do Salvar Trade
             if btn_salvar:
                 try:
                     if not ativo:
@@ -407,11 +504,60 @@ elif menu == "📁 Minhas Contas":
                     st.toast("Erro, e tente novamente", icon="❌")
                     st.error("Erro, e tente novamente. Verifique os valores inseridos.")
 
-        # --- ABA 3: EXCLUIR CONTA SELECIONADA ---
+        # --- ABA 3: OPÇÕES DA CONTA (EDITAR DADOS DA CONTA & EXCLUIR) ---
         with tab_gerenciar:
-            st.subheader("Gerenciamento Desta Conta")
-            st.warning(f"Você está na conta: **{c['nome']} ({c['mesa']})**")
+            st.subheader(f"⚙️ Configurações da Conta: {c['nome']} ({c['mesa']})")
             
+            # FORMULÁRIO DE EDIÇÃO DA CONTA
+            with st.expander("✏️ Editar Dados Desta Conta", expanded=True):
+                with st.form("form_editar_conta_atual"):
+                    c1_ed, c2_ed = st.columns(2)
+                    with c1_ed:
+                        ed_nome = st.text_input("Identificação da Conta", value=str(c['nome']))
+                        ed_trader = st.text_input("Nome do Trader", value=str(c['trader']))
+                        ed_mesa = st.text_input("Nome da Mesa", value=str(c['mesa']))
+                        
+                        tam_opcoes = ["25k", "50k", "100k", "150k", "250k", "300k", "Outro"]
+                        idx_tam = tam_opcoes.index(c['tamanho_conta']) if c['tamanho_conta'] in tam_opcoes else 0
+                        ed_tamanho = st.selectbox("Tamanho da Conta", tam_opcoes, index=idx_tam)
+
+                        tipo_opcoes = ["Challenge (Avaliação)", "No Activation", "Standard / Master", "Instant Funding / Freedom"]
+                        idx_tipo = tipo_opcoes.index(c['tipo']) if c['tipo'] in tipo_opcoes else 0
+                        ed_tipo = st.selectbox("Tipo de Conta", tipo_opcoes, index=idx_tipo)
+
+                    with c2_ed:
+                        ed_saldo = st.text_input("Saldo Inicial ($)", value=fmt_br_input(c['saldo_inicial']))
+                        ed_dd = st.text_input("Drawdown Máximo ($)", value=fmt_br_input(c['max_dd']))
+                        ed_limite = st.text_input("Limite Diário ($)", value=fmt_br_input(c['limite_diario']))
+                        ed_meta = st.text_input("Meta de Lucro ($)", value=fmt_br_input(c['meta']))
+                        ed_saques = st.text_input("Total em Saques Já Aprovados ($)", value=fmt_br_input(c['total_saques']))
+                        
+                        dt_janela_val = datetime.strptime(c['data_inicio_janela'], "%Y-%m-%d").date() if c['data_inicio_janela'] else date.today()
+                        ed_dt_janela = st.date_input("Início da Janela de Saque", value=dt_janela_val, format="DD/MM/YYYY")
+
+                    salvar_ed_conta = st.form_submit_button("💾 Salvar Alterações da Conta")
+                    if salvar_ed_conta:
+                        try:
+                            s_ini_f = converter_br_para_float(ed_saldo)
+                            m_dd_f = converter_br_para_float(ed_dd)
+                            l_dia_f = converter_br_para_float(ed_limite)
+                            meta_f = converter_br_para_float(ed_meta)
+                            saques_f = converter_br_para_float(ed_saques)
+
+                            cursor.execute("""
+                            UPDATE contas SET nome=?, trader=?, mesa=?, tamanho_conta=?, tipo=?, saldo_inicial=?, max_dd=?, limite_diario=?, meta=?, total_saques=?, data_inicio_janela=?
+                            WHERE id=?
+                            """, (ed_nome, ed_trader, ed_mesa, ed_tamanho, ed_tipo, s_ini_f, m_dd_f, l_dia_f, meta_f, saques_f, str(ed_dt_janela), c_id))
+                            conn.commit()
+                            st.toast("Atualizado", icon="✅")
+                            st.success("Dados da conta alterados com sucesso!")
+                            st.rerun()
+                        except Exception:
+                            st.toast("Erro, e tente novamente", icon="❌")
+                            st.error("Erro ao atualizar a conta. Verifique os valores digitados.")
+
+            st.markdown("---")
+            st.subheader("Zona de Perigo")
             confirmar_del = st.checkbox(f"⚠️ Confirmo que desejo apagar definitivamente a conta '{c['nome']}' e todos os seus trades.")
             if st.button("🗑️ Excluir Esta Conta Definitivamente"):
                 if confirmar_del:
@@ -522,11 +668,11 @@ elif menu == "🛡️ Regras e Compliance":
                 st.success("✅ **REGRA APROVADA:** Volume de contratos homogêneo.")
 
 # =========================================================
-# 4. CADASTRAR (APENAS NOVAS CONTAS)
+# 4. CADASTRAR & EDITAR CONTAS
 # =========================================================
 elif menu == "➕ Cadastrar":
     st.title("➕ Cadastrar Nova Conta")
-    st.caption("Cadastre aqui apenas novas contas de mesas proprietárias que ainda não constam no sistema.")
+    st.caption("Cadastre novas contas ou edite configurações de contas já cadastradas.")
 
     with st.form("form_cadastrar_conta"):
         c1, c2 = st.columns(2)
@@ -573,3 +719,60 @@ elif menu == "➕ Cadastrar":
             except Exception:
                 st.toast("Erro, e tente novamente", icon="❌")
                 st.error("Erro, e tente novamente. Verifique se digitou os dados corretamente.")
+
+    # OPÇÃO DE EDITAR CONTA CADASTRADA DIRETAMENTE DAQUI
+    if not contas_df.empty:
+        st.markdown("---")
+        with st.expander("✏️ Editar Conta Já Cadastrada (Correção de Dados)", expanded=False):
+            lista_edit_cad = [f"{c['id']} - {c['nome']} ({c['mesa']}) | Trader: {c['trader']}" for _, c in contas_df.iterrows()]
+            conta_edit_sel = st.selectbox("Selecione a Conta para Corrigir:", lista_edit_cad, key="sel_ed_cad_conta")
+            id_c_edit = int(conta_edit_sel.split(" - ")[0])
+            c_ed_dados = contas_df[contas_df["id"] == id_c_edit].iloc[0]
+
+            with st.form("form_edicao_rapida_conta"):
+                col_e1, col_e2 = st.columns(2)
+                with col_e1:
+                    e_nome = st.text_input("Nome da Conta", value=str(c_ed_dados["nome"]))
+                    e_trader = st.text_input("Trader", value=str(c_ed_dados["trader"]))
+                    e_mesa = st.text_input("Mesa", value=str(c_ed_dados["mesa"]))
+                    
+                    tam_lst = ["25k", "50k", "100k", "150k", "250k", "300k", "Outro"]
+                    i_tam = tam_lst.index(c_ed_dados["tamanho_conta"]) if c_ed_dados["tamanho_conta"] in tam_lst else 0
+                    e_tam = st.selectbox("Tamanho", tam_lst, index=i_tam)
+
+                    tip_lst = ["Challenge (Avaliação)", "No Activation", "Standard / Master", "Instant Funding / Freedom"]
+                    i_tip = tip_lst.index(c_ed_dados["tipo"]) if c_ed_dados["tipo"] in tip_lst else 0
+                    e_tipo = st.selectbox("Tipo", tip_lst, index=i_tip)
+
+                with col_e2:
+                    e_saldo = st.text_input("Saldo Inicial ($)", value=fmt_br_input(c_ed_dados["saldo_inicial"]))
+                    e_dd = st.text_input("Drawdown Máximo ($)", value=fmt_br_input(c_ed_dados["max_dd"]))
+                    e_limite = st.text_input("Limite Diário ($)", value=fmt_br_input(c_ed_dados["limite_diario"]))
+                    e_meta = st.text_input("Meta ($)", value=fmt_br_input(c_ed_dados["meta"]))
+                    e_saques = st.text_input("Total Saques ($)", value=fmt_br_input(c_ed_dados["total_saques"]))
+                    
+                    d_ini = datetime.strptime(c_ed_dados["data_inicio_janela"], "%Y-%m-%d").date() if c_ed_dados["data_inicio_janela"] else date.today()
+                    e_data_ini = st.date_input("Início da Janela", value=d_ini, format="DD/MM/YYYY")
+
+                salvar_ed_rapida = st.form_submit_button("💾 Salvar Alterações Desta Conta")
+                if salvar_ed_rapida:
+                    try:
+                        cursor.execute("""
+                        UPDATE contas SET nome=?, trader=?, mesa=?, tamanho_conta=?, tipo=?, saldo_inicial=?, max_dd=?, limite_diario=?, meta=?, total_saques=?, data_inicio_janela=?
+                        WHERE id=?
+                        """, (
+                            e_nome, e_trader, e_mesa, e_tam, e_tipo,
+                            converter_br_para_float(e_saldo),
+                            converter_br_para_float(e_dd),
+                            converter_br_para_float(e_limite),
+                            converter_br_para_float(e_meta),
+                            converter_br_para_float(e_saques),
+                            str(e_data_ini),
+                            id_c_edit
+                        ))
+                        conn.commit()
+                        st.toast("Atualizado", icon="✅")
+                        st.success("Conta atualizada com sucesso!")
+                        st.rerun()
+                    except Exception:
+                        st.toast("Erro, e tente novamente", icon="❌")
