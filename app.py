@@ -109,7 +109,6 @@ def parse_display_duracao(val):
 # --- BANCO DE DADOS FIXO COM AUTO-MIGRAÇÃO ---
 DB_NAME = "mesas_pro.db"
 
-# Se o banco atual não existir, mas existirem os bancos anteriores (v5 ou v4), migrar dados automaticamente
 if not os.path.exists(DB_NAME):
     for legado in ["mesas_v5.db", "mesas_v4.db", "mesas.db"]:
         if os.path.exists(legado):
@@ -177,7 +176,7 @@ CREATE TABLE IF NOT EXISTS saques (
 cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 
-# Migração segura de colunas na tabela trades caso ela já existisse
+# Verificação segura de colunas na tabela trades
 cursor.execute("PRAGMA table_info(trades)")
 t_cols = [r[1] for r in cursor.fetchall()]
 if "direcao" not in t_cols:
@@ -187,7 +186,6 @@ if "pontos" not in t_cols:
 if "custos" not in t_cols:
     cursor.execute("ALTER TABLE trades ADD COLUMN custos REAL DEFAULT 0.0")
 
-# Inserção de ativos e estratégias padrão se vazias
 cursor.execute("SELECT COUNT(*) FROM ativos")
 if cursor.fetchone()[0] == 0:
     for a in ["NQ (Nasdaq)", "ES (S&P 500)", "YM (Dow)", "CL (Petróleo)", "GC (Ouro)", "RTY (Russell)"]:
@@ -216,7 +214,7 @@ saques_df = pd.read_sql("SELECT * FROM saques", conn)
 ativos_df = pd.read_sql("SELECT nome FROM ativos ORDER BY nome ASC", conn)
 estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", conn)
 
-# --- NAVEGAÇÃO LATERAL EM QUADRADOS (SEM BOLINHAS E SEM 'IR PARA') ---
+# --- NAVEGAÇÃO LATERAL EM QUADRADOS (COM OPÇÃO BACKUP) ---
 if "menu" not in st.session_state:
     st.session_state.menu = "📊 Painel Geral"
 
@@ -226,6 +224,7 @@ opcoes_menu = [
     "📁 Minhas Contas",
     "💰 Relatório Financeiro",
     "🛡️ Regras e Compliance",
+    "💾 Backup",
     "➕ Cadastrar"
 ]
 
@@ -378,11 +377,11 @@ elif menu == "📁 Minhas Contas":
 
         if is_financiada:
             tab_painel, tab_lancar, tab_saques, tab_gerenciar = st.tabs([
-                "📊 Desempenho da Conta", "➕ Lançar Trade", "💸 Saques da Conta", "⚙️ Opções & Backup"
+                "📊 Desempenho da Conta", "➕ Lançar Trade", "💸 Saques da Conta", "⚙️ Opções da Conta"
             ])
         else:
             tab_painel, tab_lancar, tab_gerenciar = st.tabs([
-                "📊 Desempenho da Conta", "➕ Lançar Trade", "⚙️ Opções & Backup"
+                "📊 Desempenho da Conta", "➕ Lançar Trade", "⚙️ Opções da Conta"
             ])
 
         # --- ABA 1: DESEMPENHO E HISTÓRICO ---
@@ -680,11 +679,11 @@ elif menu == "📁 Minhas Contas":
                         use_container_width=True
                     )
 
-        # --- ABA DE OPÇÕES DA CONTA & SISTEMA DE BACKUP ---
+        # --- ABA DE OPÇÕES DA CONTA (EDITAR CUSTOS & DADOS) ---
         with tab_gerenciar:
             st.subheader(f"⚙️ Configurações da Conta: {c['nome']} ({c['mesa']})")
             
-            with st.expander("✏️ Editar Dados e Custos Desta Conta", expanded=False):
+            with st.expander("✏️ Editar Dados e Custos Desta Conta", expanded=True):
                 with st.form("form_editar_conta_atual"):
                     c1_ed, c2_ed = st.columns(2)
                     with c1_ed:
@@ -746,65 +745,6 @@ elif menu == "📁 Minhas Contas":
                         except Exception as e:
                             st.toast("Erro, e tente novamente", icon="❌")
                             st.error(f"Erro ao atualizar a conta: {str(e)}")
-
-            # --- SISTEMA DE BACKUP E RESTAURAÇÃO DE DADOS ---
-            st.markdown("---")
-            st.subheader("💾 Backup e Segurança dos Seus Dados")
-            st.caption("Baixe um arquivo com todas as suas contas, trades e saques para guardar com 100% de segurança no seu computador.")
-            
-            col_bk1, col_bk2 = st.columns(2)
-            with col_bk1:
-                # Gerar JSON de Backup
-                dados_backup = {
-                    "contas": pd.read_sql("SELECT * FROM contas", conn).to_dict(orient="records"),
-                    "trades": pd.read_sql("SELECT * FROM trades", conn).to_dict(orient="records"),
-                    "saques": pd.read_sql("SELECT * FROM saques", conn).to_dict(orient="records"),
-                    "ativos": pd.read_sql("SELECT * FROM ativos", conn).to_dict(orient="records"),
-                    "estrategias": pd.read_sql("SELECT * FROM estrategias", conn).to_dict(orient="records")
-                }
-                backup_json = json.dumps(dados_backup, ensure_ascii=False, indent=2)
-                st.download_button(
-                    "📥 Baixar Backup Geral (.json)",
-                    data=backup_json,
-                    file_name=f"backup_mesas_{date.today().strftime('%d_%m_%Y')}.json",
-                    mime="application/json",
-                    use_container_width=True
-                )
-
-            with col_bk2:
-                arquivo_restaurar = st.file_uploader("📤 Restaurar Backup (.json)", type=["json"], label_visibility="collapsed")
-                if arquivo_restaurar is not None:
-                    if st.button("Restaurar Meus Dados Agora", use_container_width=True):
-                        try:
-                            conteudo = json.load(arquivo_restaurar)
-                            # Restaurar tabelas
-                            if "contas" in conteudo and conteudo["contas"]:
-                                cursor.execute("DELETE FROM contas")
-                                for r in conteudo["contas"]:
-                                    cols = ", ".join(r.keys())
-                                    places = ", ".join(["?"] * len(r))
-                                    cursor.execute(f"INSERT INTO contas ({cols}) VALUES ({places})", list(r.values()))
-
-                            if "trades" in conteudo and conteudo["trades"]:
-                                cursor.execute("DELETE FROM trades")
-                                for r in conteudo["trades"]:
-                                    cols = ", ".join(r.keys())
-                                    places = ", ".join(["?"] * len(r))
-                                    cursor.execute(f"INSERT INTO trades ({cols}) VALUES ({places})", list(r.values()))
-
-                            if "saques" in conteudo and conteudo["saques"]:
-                                cursor.execute("DELETE FROM saques")
-                                for r in conteudo["saques"]:
-                                    cols = ", ".join(r.keys())
-                                    places = ", ".join(["?"] * len(r))
-                                    cursor.execute(f"INSERT INTO saques ({cols}) VALUES ({places})", list(r.values()))
-
-                            conn.commit()
-                            st.toast("Backup Restaurado com Sucesso!", icon="✅")
-                            st.success("Todos os seus dados foram restaurados!")
-                            st.rerun()
-                        except Exception as ex:
-                            st.error(f"Erro ao restaurar arquivo: {str(ex)}")
 
             st.markdown("---")
             st.subheader("Zona de Perigo")
@@ -1005,7 +945,79 @@ elif menu == "🛡️ Regras e Compliance":
                 st.success("✅ **REGRA APROVADA:** Volume de contratos homogêneo.")
 
 # =========================================================
-# 5. CADASTRAR NOVA CONTA COM SISTEMA ANTI-DUPLICAÇÃO
+# 5. BACKUP GERAL DE TODAS AS INFORMAÇÕES
+# =========================================================
+elif menu == "💾 Backup":
+    st.title("💾 Backup Geral & Segurança dos Dados")
+    st.caption("Faça o download do backup consolidado de TODAS as suas contas, trades, saques e custos. Guarde esse arquivo no seu PC para nunca perder nenhuma informação.")
+
+    col_bkg1, col_bkg2 = st.columns(2)
+
+    with col_bkg1:
+        st.subheader("📥 Exportar Backup Completo")
+        st.write("Gera uma cópia de segurança de todo o sistema (todas as contas juntas).")
+        
+        # Consolidação de todas as tabelas em um único JSON
+        dados_backup = {
+            "contas": pd.read_sql("SELECT * FROM contas", conn).to_dict(orient="records"),
+            "trades": pd.read_sql("SELECT * FROM trades", conn).to_dict(orient="records"),
+            "saques": pd.read_sql("SELECT * FROM saques", conn).to_dict(orient="records"),
+            "ativos": pd.read_sql("SELECT * FROM ativos", conn).to_dict(orient="records"),
+            "estrategias": pd.read_sql("SELECT * FROM estrategias", conn).to_dict(orient="records")
+        }
+        backup_json = json.dumps(dados_backup, ensure_ascii=False, indent=2)
+
+        st.download_button(
+            "📥 Baixar Arquivo de Backup Geral (.json)",
+            data=backup_json,
+            file_name=f"backup_geral_mesas_{date.today().strftime('%d_%m_%Y')}.json",
+            mime="application/json",
+            use_container_width=True,
+            type="primary"
+        )
+        
+        st.info(f"📊 **Dados inclusos no backup atual:**\n- **{len(dados_backup['contas'])}** conta(s)\n- **{len(dados_backup['trades'])}** trade(s)\n- **{len(dados_backup['saques'])}** saque(s)")
+
+    with col_bkg2:
+        st.subheader("📤 Restaurar Backup Completo")
+        st.write("Envie o arquivo `.json` gerado anteriormente para recuperar tudo instantaneamente.")
+
+        arquivo_upload = st.file_uploader("Selecione o arquivo de backup (.json)", type=["json"])
+        if arquivo_upload is not None:
+            if st.button("Restaurar Todos os Dados Agora", use_container_width=True):
+                try:
+                    conteudo = json.load(arquivo_upload)
+
+                    if "contas" in conteudo and conteudo["contas"]:
+                        cursor.execute("DELETE FROM contas")
+                        for r in conteudo["contas"]:
+                            cols = ", ".join(r.keys())
+                            places = ", ".join(["?"] * len(r))
+                            cursor.execute(f"INSERT INTO contas ({cols}) VALUES ({places})", list(r.values()))
+
+                    if "trades" in conteudo and conteudo["trades"]:
+                        cursor.execute("DELETE FROM trades")
+                        for r in conteudo["trades"]:
+                            cols = ", ".join(r.keys())
+                            places = ", ".join(["?"] * len(r))
+                            cursor.execute(f"INSERT INTO trades ({cols}) VALUES ({places})", list(r.values()))
+
+                    if "saques" in conteudo and conteudo["saques"]:
+                        cursor.execute("DELETE FROM saques")
+                        for r in conteudo["saques"]:
+                            cols = ", ".join(r.keys())
+                            places = ", ".join(["?"] * len(r))
+                            cursor.execute(f"INSERT INTO saques ({cols}) VALUES ({places})", list(r.values()))
+
+                    conn.commit()
+                    st.toast("Backup Geral Restaurado com Sucesso!", icon="✅")
+                    st.success("Todos os dados do arquivo foram restaurados perfeitamente!")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"Erro ao processar arquivo de restauração: {str(ex)}")
+
+# =========================================================
+# 6. CADASTRAR NOVA CONTA COM SISTEMA ANTI-DUPLICAÇÃO
 # =========================================================
 elif menu == "➕ Cadastrar":
     st.title("➕ Cadastrar Nova Conta")
