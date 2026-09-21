@@ -180,7 +180,6 @@ CREATE TABLE IF NOT EXISTS saques (
 cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 
-# Verificação segura de colunas
 cursor.execute("PRAGMA table_info(trades)")
 t_cols = [r[1] for r in cursor.fetchall()]
 if "direcao" not in t_cols:
@@ -267,7 +266,6 @@ if menu == "📊 Painel Geral":
 
         st.markdown("---")
 
-        # RADAR TOP 3 CONTAS
         st.subheader("🎯 Radar Diário: Contas Recomendadas para Hoje (Máx 3)")
         st.caption("Foco disciplinado: Evite inatividade de 7 dias e priorize contas que exigem performance.")
 
@@ -883,22 +881,19 @@ elif menu == "🛡️ Regras e Compliance":
         st.write(f"**Total em Saques:** `{fmt_moeda(c_info['total_saques'])}` | **Janela Atual Iniciada em:** `{fmt_data(c_info['data_inicio_janela'])}`")
         st.markdown("---")
 
-        # -------------------------------------------------------------
-        # MOTOR 1: CONSISTÊNCIA DE SALDO (DIAGNÓSTICO E SOLUÇÃO EXATA)
-        # -------------------------------------------------------------
+        # 1. CONSISTÊNCIA DE SALDO
         st.subheader("1. Consistência de Saldo (Limite de Lucro Diário)")
         
         if is_ylos and status_conta == "Challenge (avaliação)":
-            st.info("ℹ️ **Fase Challenge:** A regra de consistência de saldo não barra seu teste. No entanto, se você quiser aprovar mantendo o padrão de consistência, o cálculo abaixo mostra como diluir caso tenha concentrado o lucro.")
+            st.info("ℹ️ **Fase Challenge:** A regra de consistência de saldo não barra seu teste. No entanto, o cálculo abaixo mostra como diluir caso tenha concentrado o lucro.")
 
-        # Determinar percentual limite
         if is_ylos:
             payouts = c_info["total_saques"]
             if tipo_conta in ["Freedom", "Freedom 2.0"]:
                 regra_pct = 0.30 if payouts <= 50000 else 0.20
             elif tipo_conta in ["Standard", "No Activation"]:
                 regra_pct = 0.40 if payouts <= 30000 else (0.30 if payouts <= 50000 else 0.20)
-            else: # Instant Funded
+            else:
                 regra_pct = 0.30 if payouts <= 50000 else 0.20
         else:
             regra_pct = 0.40
@@ -919,7 +914,6 @@ elif menu == "🛡️ Regras e Compliance":
                 representatividade = (maior_dia_lucro / lucro_total_janela) * 100
                 
                 if representatividade > (regra_pct * 100):
-                    # CÁLCULO DA SOLUÇÃO MATEMÁTICA DE DILUIÇÃO
                     lucro_alvo_necessario = maior_dia_lucro / regra_pct
                     falta_lucrar_diluicao = lucro_alvo_necessario - lucro_total_janela
 
@@ -937,9 +931,7 @@ elif menu == "🛡️ Regras e Compliance":
 
         st.markdown("---")
 
-        # -------------------------------------------------------------
-        # MOTOR 2: DIAS MÍNIMOS OPERADOS & DIAS VENCEDORES (>= $50)
-        # -------------------------------------------------------------
+        # 2. CRITÉRIOS DE DIAS OPERADOS E DIAS VENCEDORES (>= $50)
         st.subheader("2. Critérios de Dias Operados e Dias Vencedores (Mínimo $50)")
         
         if t_janela.empty:
@@ -949,12 +941,11 @@ elif menu == "🛡️ Regras e Compliance":
             total_dias_operados = len(pnl_d)
             dias_vencedores_50 = len(pnl_d[pnl_d["resultado"] >= 50.0])
 
-            # Exigências da Ylos por modalidade
             if is_ylos:
                 if tipo_conta in ["Freedom", "Freedom 2.0"]:
                     meta_dias_op = 10
                     meta_dias_win = 10
-                else: # Standard, No Activation, Funded Master
+                else:
                     meta_dias_op = 10
                     meta_dias_win = 7
             else:
@@ -979,9 +970,7 @@ elif menu == "🛡️ Regras e Compliance":
 
         st.markdown("---")
 
-        # -------------------------------------------------------------
-        # MOTOR 3: REGRA DA MEDIANA 5x (RISCO X RETORNO)
-        # -------------------------------------------------------------
+        # 3. REGRA DA MEDIANA 5x
         st.subheader("3. Risco x Retorno (Regra da Mediana 5x)")
         
         trades_gain = t_janela[t_janela["resultado"] > 0]["resultado"]
@@ -1012,9 +1001,7 @@ elif menu == "🛡️ Regras e Compliance":
 
         st.markdown("---")
 
-        # -------------------------------------------------------------
-        # MOTOR 4: DETECTOR DE MICROSCALPING (< 30 SEGUNDOS)
-        # -------------------------------------------------------------
+        # 4. MICROSCALPING (< 30 SEGUNDOS)
         st.subheader("4. Estilo Operacional e Tempo de Operação (Regra Anti-Microscalping)")
         
         if not t_janela.empty:
@@ -1026,18 +1013,16 @@ elif menu == "🛡️ Regras e Compliance":
 
             if trades_rapidos:
                 st.error(f"❌ **ALERTA DE REGRA PROIBIDA (Microscalp):** Foram detectadas **{len(trades_rapidos)}** operações com menos de 30 segundos de duração. A Ylos proíbe operações com menos de 30s na maioria dos trades.")
-                st.caption("💡 **Solução:** Alongue o tempo de permanência nas operações para evitar que a mesa desqualifique seu histórico como arbitragem de liquidez.")
+                st.caption("💡 **Solução:** Alongue o tempo de permanência nas operações para evitar desclassificação.")
             else:
-                st.success("✅ **DENTRO DA REGRA:** Todas as suas operações duraram pelo menos 30 segundos, em conformidade com as diretrizes de scalping saudável da Ylos.")
+                st.success("✅ **DENTRO DA REGRA:** Todas as suas operações duraram pelo menos 30 segundos.")
 
-        # -------------------------------------------------------------
-        # MOTOR 5: MONITORAMENTO DE DRAWDOWN TRAILING vs EOD
-        # -------------------------------------------------------------
         st.markdown("---")
+
+        # 5. DRAWDOWN TRAILING vs EOD
         st.subheader("5. Monitoramento de Drawdown")
         
         if is_ylos and tipo_conta in ["Standard", "No Activation"] and status_conta in ["Funded (Financiada)", "Live (Real)"]:
-            # Regra da Trava do Trailing Ylos: Trava estático em Saldo Inicial + Drawdown + $100
             trava_estatica = c_info["saldo_inicial"] + c_info["max_dd"] + 100.0
             saldo_atual_conta = c_info["saldo_inicial"] + t_all["resultado"].sum() if not t_all.empty else c_info["saldo_inicial"]
             
@@ -1122,115 +1107,162 @@ elif menu == "💾 Backup":
                     st.error(f"Erro ao processar arquivo de restauração: {str(ex)}")
 
 # =========================================================
-# 6. CADASTRAR NOVA CONTA COM SISTEMA ANTI-DUPLICAÇÃO
+# 6. CADASTRAR NOVA CONTA (COM AUTO-PREENCHIMENTO DE SALDO)
 # =========================================================
 elif menu == "➕ Cadastrar":
     st.title("➕ Cadastrar Nova Conta")
-    st.caption("Cadastre aqui contas recém-adquiridas com seus respectivos custos e parâmetros.")
+    st.caption("Cadastre novas contas. O saldo inicial é preenchido proporcionalmente de forma automática conforme o tamanho da conta escolhido.")
 
-    with st.form("form_cadastrar_conta"):
-        c1, c2 = st.columns(2)
-        with c1:
-            nome = st.text_input("Identificação da Conta", value="", placeholder="ex: Apex 50k #1")
-            trader = st.text_input("Nome do Trader Responsável", value="", placeholder="Nome do Trader")
-            mesa = st.text_input("Nome da Mesa", value="", placeholder="ex: Ylos Trading, Mide Global, Apex")
-            
-            tamanho_conta = st.selectbox(
-                "Tamanho da Conta",
-                ["25k", "50k", "100k", "150k", "250k", "300k", "Outro"],
-                index=None,
-                placeholder="Selecione o Tamanho..."
-            )
-            
-            tipo = st.selectbox(
-                "Tipo / Modelo de Conta",
-                ["Freedom", "Freedom 2.0", "Standard", "No Activation", "Instant Funded"],
-                index=None,
-                placeholder="Selecione o Modelo..."
-            )
+    # MAPEAMENTO INTELIGENTE DE TAMANHO PARA SALDO INICIAL
+    MAPA_TAMANHO_SALDO = {
+        "25k": "25.000,00",
+        "50k": "50.000,00",
+        "100k": "100.000,00",
+        "150k": "150.000,00",
+        "250k": "250.000,00",
+        "300k": "300.000,00"
+    }
 
-            status = st.selectbox(
-                "Fase / Status da Conta",
-                ["Challenge (avaliação)", "Funded (Financiada)", "Live (Real)"],
-                index=None,
-                placeholder="Selecione a Fase..."
-            )
+    def on_change_tamanho():
+        tam = st.session_state.get("cad_tamanho_sel")
+        if tam in MAPA_TAMANHO_SALDO:
+            st.session_state["cad_saldo_input"] = MAPA_TAMANHO_SALDO[tam]
+        elif tam == "Outro":
+            st.session_state["cad_saldo_input"] = ""
 
-        with c2:
-            saldo_str = st.text_input("Saldo Inicial ($)", value="", placeholder="0,00 (ex: 50.000,00)")
-            max_dd_str = st.text_input("Drawdown Máximo Permitido ($)", value="", placeholder="0,00 (ex: 2.500,00)")
-            limite_diario_str = st.text_input("Limite Diário de Perda ($)", value="", placeholder="0,00 (ex: 1.000,00)")
-            meta_str = st.text_input("Meta de Lucro ($)", value="", placeholder="0,00 (ex: 3.000,00)")
-
-            st.markdown("**Custos e Investimento na Conta:**")
-            col_cust1, col_cust2 = st.columns(2)
-            with col_cust1:
-                custo_mesa_str = st.text_input("Valor Pago pela Mesa / Prova ($)", value="", placeholder="0,00")
-                custo_ativ_str = st.text_input("Taxa de Ativação ($)", value="", placeholder="0,00")
-            with col_cust2:
-                custo_reset_str = st.text_input("Custo com Resets ($)", value="", placeholder="0,00")
-                outros_custos_str = st.text_input("Outros Custos ($)", value="", placeholder="0,00")
-
-            data_inicio = st.date_input("Início das Operações / Janela", value=date.today(), format="DD/MM/YYYY")
-
-        salvar = st.form_submit_button("Cadastrar Nova Conta")
-
-        if salvar:
+    def on_change_tam_custom():
+        cust = st.session_state.get("cad_tam_custom_val", "")
+        if cust:
+            txt_clean = cust.strip().lower().replace("k", "000").replace(".", "").replace(",", "")
             try:
-                if not nome.strip():
-                    raise ValueError("Preencha a Identificação da Conta.")
-                if not trader.strip():
-                    raise ValueError("Preencha o Nome do Trader Responsável.")
-                if not mesa.strip():
-                    raise ValueError("Preencha o Nome da Mesa.")
-                if not tamanho_conta:
-                    raise ValueError("Selecione o Tamanho da Conta.")
-                if not tipo:
-                    raise ValueError("Selecione o Tipo / Modelo de Conta.")
-                if not status:
-                    raise ValueError("Selecione a Fase / Status da Conta.")
-                if not saldo_str.strip():
-                    raise ValueError("Informe o Saldo Inicial ($).")
-                if not max_dd_str.strip():
-                    raise ValueError("Informe o Drawdown Máximo Permitido ($).")
-                if not limite_diario_str.strip():
-                    raise ValueError("Informe o Limite Diário de Perda ($).")
-                if not meta_str.strip():
-                    raise ValueError("Informe a Meta de Lucro ($).")
+                val = float(txt_clean)
+                st.session_state["cad_saldo_input"] = fmt_br_input(val)
+            except:
+                pass
 
-                # SISTEMA ANTI-DUPLICAÇÃO DE CONTAS
+    if "cad_saldo_input" not in st.session_state:
+        st.session_state["cad_saldo_input"] = ""
+
+    c1, c2 = st.columns(2)
+    with c1:
+        nome = st.text_input("Identificação da Conta", value="", placeholder="ex: Apex 50k #1")
+        trader = st.text_input("Nome do Trader Responsável", value="", placeholder="Nome do Trader")
+        mesa = st.text_input("Nome da Mesa", value="", placeholder="ex: Ylos Trading, Mide Global, Apex")
+        
+        tamanho_conta = st.selectbox(
+            "Tamanho da Conta",
+            ["25k", "50k", "100k", "150k", "250k", "300k", "Outro"],
+            index=None,
+            placeholder="Selecione o Tamanho...",
+            key="cad_tamanho_sel",
+            on_change=on_change_tamanho
+        )
+
+        tam_final = tamanho_conta
+        if tamanho_conta == "Outro":
+            tam_custom = st.text_input(
+                "Especifique o Tamanho Personalizado (ex: 75k, 200k)",
+                key="cad_tam_custom_val",
+                placeholder="ex: 75k",
+                on_change=on_change_tam_custom
+            )
+            if tam_custom:
+                tam_final = tam_custom
+        
+        tipo = st.selectbox(
+            "Tipo / Modelo de Conta",
+            ["Freedom", "Freedom 2.0", "Standard", "No Activation", "Instant Funded"],
+            index=None,
+            placeholder="Selecione o Modelo..."
+        )
+
+        status = st.selectbox(
+            "Fase / Status da Conta",
+            ["Challenge (avaliação)", "Funded (Financiada)", "Live (Real)"],
+            index=None,
+            placeholder="Selecione a Fase..."
+        )
+
+    with c2:
+        saldo_str = st.text_input(
+            "Saldo Inicial ($)",
+            key="cad_saldo_input",
+            placeholder="0,00 (Preenchido automaticamente ao selecionar o tamanho)"
+        )
+        max_dd_str = st.text_input("Drawdown Máximo Permitido ($)", value="", placeholder="0,00 (ex: 2.500,00)")
+        limite_diario_str = st.text_input("Limite Diário de Perda ($)", value="", placeholder="0,00 (ex: 1.000,00)")
+        meta_str = st.text_input("Meta de Lucro ($)", value="", placeholder="0,00 (ex: 3.000,00)")
+
+        st.markdown("**Custos e Investimento na Conta:**")
+        col_cust1, col_cust2 = st.columns(2)
+        with col_cust1:
+            custo_mesa_str = st.text_input("Valor Pago pela Mesa / Prova ($)", value="", placeholder="0,00")
+            custo_ativ_str = st.text_input("Taxa de Ativação ($)", value="", placeholder="0,00")
+        with col_cust2:
+            custo_reset_str = st.text_input("Custo com Resets ($)", value="", placeholder="0,00")
+            outros_custos_str = st.text_input("Outros Custos ($)", value="", placeholder="0,00")
+
+        data_inicio = st.date_input("Início das Operações / Janela", value=date.today(), format="DD/MM/YYYY")
+
+    st.write("")
+    btn_salvar_conta = st.button("💾 Cadastrar Nova Conta", type="primary", use_container_width=True)
+
+    if btn_salvar_conta:
+        try:
+            if not nome.strip():
+                raise ValueError("Preencha a Identificação da Conta.")
+            if not trader.strip():
+                raise ValueError("Preencha o Nome do Trader Responsável.")
+            if not mesa.strip():
+                raise ValueError("Preencha o Nome da Mesa.")
+            if not tam_final:
+                raise ValueError("Selecione ou informe o Tamanho da Conta.")
+            if not tipo:
+                raise ValueError("Selecione o Tipo / Modelo de Conta.")
+            if not status:
+                raise ValueError("Selecione a Fase / Status da Conta.")
+            if not saldo_str.strip():
+                raise ValueError("Informe o Saldo Inicial ($).")
+            if not max_dd_str.strip():
+                raise ValueError("Informe o Drawdown Máximo Permitido ($).")
+            if not limite_diario_str.strip():
+                raise ValueError("Informe o Limite Diário de Perda ($).")
+            if not meta_str.strip():
+                raise ValueError("Informe a Meta de Lucro ($).")
+
+            # SISTEMA ANTI-DUPLICAÇÃO DE CONTAS
+            cursor.execute("""
+            SELECT id FROM contas 
+            WHERE LOWER(TRIM(nome)) = ? AND LOWER(TRIM(mesa)) = ?
+            """, (nome.strip().lower(), mesa.strip().lower()))
+            conta_duplicada = cursor.fetchone()
+
+            if conta_duplicada:
+                st.toast("Prevenção anti-duplicação ativada!", icon="⚠️")
+                st.warning(f"⚠️ **Conta Duplicada Prevenida:** A conta **'{nome}'** na mesa **'{mesa}'** já está cadastrada no sistema! Cliques múltiplos foram bloqueados.")
+            else:
+                s_ini = converter_br_para_float(saldo_str)
+                m_dd = converter_br_para_float(max_dd_str)
+                l_dia = converter_br_para_float(limite_diario_str)
+                meta_val = converter_br_para_float(meta_str)
+                
+                c_mesa = converter_br_para_float(custo_mesa_str) if custo_mesa_str.strip() else 0.0
+                c_ativ = converter_br_para_float(custo_ativ_str) if custo_ativ_str.strip() else 0.0
+                c_reset = converter_br_para_float(custo_reset_str) if custo_reset_str.strip() else 0.0
+                c_outros = converter_br_para_float(outros_custos_str) if outros_custos_str.strip() else 0.0
+
                 cursor.execute("""
-                SELECT id FROM contas 
-                WHERE LOWER(TRIM(nome)) = ? AND LOWER(TRIM(mesa)) = ?
-                """, (nome.strip().lower(), mesa.strip().lower()))
-                conta_duplicada = cursor.fetchone()
-
-                if conta_duplicada:
-                    st.toast("Prevenção anti-duplicação ativada!", icon="⚠️")
-                    st.warning(f"⚠️ **Conta Duplicada Prevenida:** A conta **'{nome}'** na mesa **'{mesa}'** já está cadastrada no sistema! Cliques múltiplos foram bloqueados para evitar contas duplicadas acidentalmente.")
-                else:
-                    s_ini = converter_br_para_float(saldo_str)
-                    m_dd = converter_br_para_float(max_dd_str)
-                    l_dia = converter_br_para_float(limite_diario_str)
-                    meta_val = converter_br_para_float(meta_str)
-                    
-                    c_mesa = converter_br_para_float(custo_mesa_str) if custo_mesa_str.strip() else 0.0
-                    c_ativ = converter_br_para_float(custo_ativ_str) if custo_ativ_str.strip() else 0.0
-                    c_reset = converter_br_para_float(custo_reset_str) if custo_reset_str.strip() else 0.0
-                    c_outros = converter_br_para_float(outros_custos_str) if outros_custos_str.strip() else 0.0
-
-                    cursor.execute("""
-                    INSERT INTO contas (nome, trader, mesa, tamanho_conta, tipo, status, saldo_inicial, max_dd, limite_diario, meta, custo_mesa, custo_ativacao, custo_reset, outros_custos, total_saques, data_inicio_janela)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?)
-                    """, (nome, trader, mesa, tamanho_conta, tipo, status, s_ini, m_dd, l_dia, meta_val, c_mesa, c_ativ, c_reset, c_outros, str(data_inicio)))
-                    conn.commit()
-                    
-                    st.toast("Atualizado", icon="✅")
-                    st.success("Conta cadastrada com sucesso!")
-                    st.rerun()
-            except ValueError as ve:
-                st.toast("Erro, e tente novamente", icon="❌")
-                st.error(f"Atenção: {str(ve)}")
-            except Exception as e:
-                st.toast("Erro, e tente novamente", icon="❌")
-                st.error(f"Erro ao cadastrar: {str(e)}")
+                INSERT INTO contas (nome, trader, mesa, tamanho_conta, tipo, status, saldo_inicial, max_dd, limite_diario, meta, custo_mesa, custo_ativacao, custo_reset, outros_custos, total_saques, data_inicio_janela)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?)
+                """, (nome, trader, mesa, tam_final, tipo, status, s_ini, m_dd, l_dia, meta_val, c_mesa, c_ativ, c_reset, c_outros, str(data_inicio)))
+                conn.commit()
+                
+                st.toast("Atualizado", icon="✅")
+                st.success("Conta cadastrada com sucesso!")
+                st.rerun()
+        except ValueError as ve:
+            st.toast("Erro, e tente novamente", icon="❌")
+            st.error(f"Atenção: {str(ve)}")
+        except Exception as e:
+            st.toast("Erro, e tente novamente", icon="❌")
+            st.error(f"Erro ao cadastrar: {str(e)}")
