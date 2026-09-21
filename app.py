@@ -129,6 +129,18 @@ CREATE TABLE IF NOT EXISTS trades (
 )
 """)
 
+# Tabela de Saques Detalhados
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS saques (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conta_id INTEGER,
+    data_solicitacao TEXT,
+    valor REAL,
+    notas TEXT,
+    FOREIGN KEY(conta_id) REFERENCES contas(id)
+)
+""")
+
 cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
 
@@ -156,6 +168,7 @@ def dias_uteis_cme_restantes():
 
 contas_df = pd.read_sql("SELECT * FROM contas", conn)
 trades_df = pd.read_sql("SELECT * FROM trades", conn)
+saques_df = pd.read_sql("SELECT * FROM saques", conn)
 ativos_df = pd.read_sql("SELECT nome FROM ativos ORDER BY nome ASC", conn)
 estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", conn)
 
@@ -277,7 +290,7 @@ if menu == "📊 Painel Geral":
         )
 
 # =========================================================
-# 2. MINHAS CONTAS (PAINEL, TRADES, ATIVOS E ESTRATÉGIAS)
+# 2. MINHAS CONTAS (PAINEL, TRADES, SAQUES E CONFIGURAÇÕES)
 # =========================================================
 elif menu == "📁 Minhas Contas":
     if contas_df.empty:
@@ -293,10 +306,20 @@ elif menu == "📁 Minhas Contas":
         c_id = int(conta_sel.split(" - ")[0])
         c = contas_df[contas_df["id"] == c_id].iloc[0]
 
+        is_financiada = (c["tipo"] != "Challenge (Avaliação)")
+
         st.title(f"📈 {c['nome']} — {c['mesa']}")
         st.markdown(f"👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Tipo:** `{c['tipo']}` | **Saques Totais:** `{fmt_moeda(c['total_saques'])}`")
 
-        tab_painel, tab_lancar, tab_gerenciar = st.tabs(["📊 Desempenho da Conta", "➕ Lançar Trade", "⚙️ Opções da Conta"])
+        # Configuração dinâmica das abas: Mostra aba de Saque apenas se NÃO for Challenge
+        if is_financiada:
+            tab_painel, tab_lancar, tab_saques, tab_gerenciar = st.tabs([
+                "📊 Desempenho da Conta", "➕ Lançar Trade", "💸 Saques da Conta", "⚙️ Opções da Conta"
+            ])
+        else:
+            tab_painel, tab_lancar, tab_gerenciar = st.tabs([
+                "📊 Desempenho da Conta", "➕ Lançar Trade", "⚙️ Opções da Conta"
+            ])
 
         # --- ABA 1: DESEMPENHO E HISTÓRICO ---
         with tab_painel:
@@ -375,7 +398,6 @@ elif menu == "📁 Minhas Contas":
             with col_salvar:
                 btn_salvar = st.button("💾 Salvar", type="primary", use_container_width=True)
 
-            # POPOVER DE EDIÇÃO DE TRADE
             with col_edit:
                 with st.popover("✏️ Editar Trade", use_container_width=True):
                     st.markdown("### ✏️ Alterar Trade Já Lançado")
@@ -391,7 +413,6 @@ elif menu == "📁 Minhas Contas":
                         t_id = int(trade_selecionado.split(" | ")[0].replace("ID ", ""))
                         t_dados = t_conta_edit[t_conta_edit["id"] == t_id].iloc[0]
 
-                        # Campos para editar
                         ed_data = st.date_input("Data", value=datetime.strptime(t_dados["data"], "%Y-%m-%d").date(), format="DD/MM/YYYY", key=f"ed_d_{t_id}")
                         
                         idx_ativo = ativos_df["nome"].tolist().index(t_dados["ativo"]) if t_dados["ativo"] in ativos_df["nome"].tolist() else 0
@@ -474,7 +495,6 @@ elif menu == "📁 Minhas Contas":
                                 st.toast("Erro, e tente novamente", icon="❌")
                                 st.error("Esta estratégia já existe.")
 
-            # Processamento do Salvar Trade
             if btn_salvar:
                 try:
                     if not ativo:
@@ -504,11 +524,80 @@ elif menu == "📁 Minhas Contas":
                     st.toast("Erro, e tente novamente", icon="❌")
                     st.error("Erro, e tente novamente. Verifique os valores inseridos.")
 
-        # --- ABA 3: OPÇÕES DA CONTA (EDITAR DADOS DA CONTA & EXCLUIR) ---
+        # --- ABA EXCLUSIVA DE SAQUES (APENAS CONTAS FINANCIADAS / LIVE) ---
+        if is_financiada:
+            with tab_saques:
+                st.subheader(f"💸 Gestão de Saques: {c['nome']} ({c['mesa']})")
+                st.caption("Registre suas retiradas para controle de histórico e reinício automático da janela de consistência.")
+
+                saques_conta = saques_df[saques_df["conta_id"] == c_id].copy()
+                qtd_saques = len(saques_conta)
+                total_sacado_conta = saques_conta["valor"].sum() if not saques_conta.empty else 0.0
+
+                s1, s2, s3 = st.columns(3)
+                s1.metric("Quantidade de Saques", f"{qtd_saques} saque(s)")
+                s2.metric("Total Retirado Desta Conta", fmt_moeda(total_sacado_conta))
+                s3.metric("Início da Janela Atual", fmt_data(c["data_inicio_janela"]))
+
+                st.markdown("---")
+
+                # Formulário para Lançar Novo Saque
+                with st.form("form_lancar_saque"):
+                    st.markdown(f"#### Lançar {qtd_saques + 1}º Saque")
+                    col_sq1, col_sq2 = st.columns(2)
+                    with col_sq1:
+                        data_saque = st.date_input("Data da Solicitação do Saque", value=date.today(), format="DD/MM/YYYY")
+                        valor_saque_str = st.text_input("Valor Solicitado ($)", placeholder="ex: 1.500,00")
+                    with col_sq2:
+                        notas_saque = st.text_input("Identificação / Protocolo / Método", placeholder="ex: 1º Saque via Deel / Cripto / Transferência")
+
+                    btn_confirmar_saque = st.form_submit_button("💸 Confirmar Registro de Saque")
+                    if btn_confirmar_saque:
+                        try:
+                            val_saque_f = converter_br_para_float(valor_saque_str)
+                            if val_saque_f <= 0:
+                                raise ValueError("O valor do saque deve ser maior que zero.")
+
+                            # 1. Registrar na tabela de saques
+                            cursor.execute("""
+                            INSERT INTO saques (conta_id, data_solicitacao, valor, notas)
+                            VALUES (?, ?, ?, ?)
+                            """, (c_id, str(data_saque), val_saque_f, notas_saque))
+
+                            # 2. Atualizar o total sacado na conta e reiniciar a janela de consistência para a data do saque
+                            novo_total_saques = float(c["total_saques"]) + val_saque_f
+                            cursor.execute("""
+                            UPDATE contas SET total_saques=?, data_inicio_janela=?
+                            WHERE id=?
+                            """, (novo_total_saques, str(data_saque), c_id))
+
+                            conn.commit()
+                            st.toast("Atualizado", icon="✅")
+                            st.success(f"Saque de {fmt_moeda(val_saque_f)} registrado com sucesso! A nova janela de consistência começou em {fmt_data(str(data_saque))}.")
+                            st.rerun()
+                        except Exception as e:
+                            st.toast("Erro, e tente novamente", icon="❌")
+                            st.error(f"Erro ao registrar saque: {str(e)}")
+
+                # Histórico de Saques
+                if not saques_conta.empty:
+                    st.markdown("---")
+                    st.subheader("📋 Histórico de Saques Realizados")
+                    saques_view = saques_conta.copy().sort_values(by="id", ascending=False)
+                    saques_view["Data Solicitação"] = saques_view["data_solicitacao"].apply(fmt_data)
+                    saques_view["Valor ($)"] = saques_view["valor"].apply(fmt_moeda)
+
+                    st.dataframe(
+                        saques_view[["id", "Data Solicitação", "Valor ($)", "notas"]].rename(
+                            columns={"id": "Nº", "notas": "Observações / Protocolo"}
+                        ),
+                        use_container_width=True
+                    )
+
+        # --- ABA DE OPÇÕES DA CONTA (EDITAR & EXCLUIR) ---
         with tab_gerenciar:
             st.subheader(f"⚙️ Configurações da Conta: {c['nome']} ({c['mesa']})")
             
-            # FORMULÁRIO DE EDIÇÃO DA CONTA
             with st.expander("✏️ Editar Dados Desta Conta", expanded=True):
                 with st.form("form_editar_conta_atual"):
                     c1_ed, c2_ed = st.columns(2)
@@ -558,10 +647,11 @@ elif menu == "📁 Minhas Contas":
 
             st.markdown("---")
             st.subheader("Zona de Perigo")
-            confirmar_del = st.checkbox(f"⚠️ Confirmo que desejo apagar definitivamente a conta '{c['nome']}' e todos os seus trades.")
+            confirmar_del = st.checkbox(f"⚠️ Confirmo que desejo apagar definitivamente a conta '{c['nome']}' e todos os seus trades e saques.")
             if st.button("🗑️ Excluir Esta Conta Definitivamente"):
                 if confirmar_del:
                     try:
+                        cursor.execute("DELETE FROM saques WHERE conta_id = ?", (c_id,))
                         cursor.execute("DELETE FROM trades WHERE conta_id = ?", (c_id,))
                         cursor.execute("DELETE FROM contas WHERE id = ?", (c_id,))
                         conn.commit()
@@ -720,7 +810,6 @@ elif menu == "➕ Cadastrar":
                 st.toast("Erro, e tente novamente", icon="❌")
                 st.error("Erro, e tente novamente. Verifique se digitou os dados corretamente.")
 
-    # OPÇÃO DE EDITAR CONTA CADASTRADA DIRETAMENTE DAQUI
     if not contas_df.empty:
         st.markdown("---")
         with st.expander("✏️ Editar Conta Já Cadastrada (Correção de Dados)", expanded=False):
