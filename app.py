@@ -9,9 +9,9 @@ from datetime import date, datetime
 # Configuração da página (Layout limpo padrão)
 st.set_page_config(page_title="Gestão de Mesas CME", layout="wide", page_icon="📈")
 
-# --- FUNÇÕES AUXILIARES DE FORMATAÇÃO E CONVERSÃO ---
+# --- FUNÇÕES DE FORMATAÇÃO E CONVERSÃO ---
 def fmt_moeda(valor):
-    """Exibe no padrão $ 50.000,00"""
+    """Formata no padrão $ 50.000,00"""
     if valor is None or pd.isna(valor):
         return "$ 0,00"
     sinal = "-" if valor < 0 else ""
@@ -20,7 +20,7 @@ def fmt_moeda(valor):
     return f"{sinal}$ {formatado}"
 
 def fmt_data(data_str):
-    """Exibe no padrão DD/MM/AAAA"""
+    """Formata no padrão DD/MM/AAAA"""
     if not data_str or pd.isna(data_str):
         return "-"
     try:
@@ -105,145 +105,148 @@ trades_df = pd.read_sql("SELECT * FROM trades", conn)
 ativos_df = pd.read_sql("SELECT nome FROM ativos ORDER BY nome ASC", conn)
 estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", conn)
 
-# Menu Lateral
+# Menu Lateral Atualizado
 st.sidebar.title("Navegação")
 menu = st.sidebar.radio(
     "Ir para:",
-    ["📊 Painel Principal (Global & Individual)", "➕ Lançar Trade", "🛡️ Regras e Compliance", "⚙️ Gerenciar Contas & Ativos"]
+    ["📊 Painel Geral", "📁 Minhas Contas", "🛡️ Regras e Compliance", "⚙️ Gerenciar Contas & Ativos"]
 )
 
 # =========================================================
-# 1. PAINEL PRINCIPAL
+# 1. PAINEL GERAL (CONSOLIDADO GLOBAL & RADAR DO DIA)
 # =========================================================
-if menu == "📊 Painel Principal (Global & Individual)":
+if menu == "📊 Painel Geral":
+    st.title("📊 Painel Geral Consolidado")
+    
     if contas_df.empty:
-        st.title("📊 Painel Geral")
         st.info("👋 Nenhuma conta cadastrada ainda. Acesse **'⚙️ Gerenciar Contas & Ativos'** para começar!")
     else:
-        opcoes_seletor = ["🌐 Visão Global (Todas as Contas)"] + [
-            f"{c['nome']} — {c['mesa']} ({c['tamanho_conta']}) | Trader: {c['trader']}" for _, c in contas_df.iterrows()
+        total_saldo_inicial = contas_df["saldo_inicial"].sum()
+        total_lucro_global = trades_df["resultado"].sum() if not trades_df.empty else 0.0
+        saldo_global_atual = total_saldo_inicial + total_lucro_global
+        total_saques_global = contas_df["total_saques"].sum()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Resultado Líquido Global", fmt_moeda(total_lucro_global), delta=fmt_moeda(total_lucro_global))
+        c2.metric("Saldo Total sob Gestão", fmt_moeda(saldo_global_atual))
+        c3.metric("Total de Saques Realizados", fmt_moeda(total_saques_global))
+        c4.metric("Total de Contas Ativas", len(contas_df))
+
+        st.markdown("---")
+
+        # RADAR TOP 3 CONTAS
+        st.subheader("🎯 Radar Diário: Contas Recomendadas para Hoje (Máx 3)")
+        st.caption("Foco disciplinado: Evite inatividade de 7 dias e priorize contas que exigem performance.")
+
+        hoje = date.today()
+        dias_uteis = dias_uteis_cme_restantes()
+        status_contas = []
+
+        for _, c in contas_df.iterrows():
+            t_conta = trades_df[trades_df["conta_id"] == c["id"]]
+            if not t_conta.empty:
+                ult_data = datetime.strptime(t_conta["data"].max(), "%Y-%m-%d").date()
+                dias_sem_operar = (hoje - ult_data).days
+                operou_hoje = (ult_data == hoje)
+            else:
+                dias_sem_operar = 99
+                operou_hoje = False
+
+            lucro_conta = t_conta["resultado"].sum() if not t_conta.empty else 0.0
+            saldo_conta = c["saldo_inicial"] + lucro_conta
+            falta_meta = max(0.0, (c["saldo_inicial"] + c["meta"]) - saldo_conta)
+            mam = falta_meta / dias_uteis
+
+            score = 0
+            if dias_sem_operar >= 5:
+                score += 1500 + dias_sem_operar * 50
+            elif dias_sem_operar >= 3:
+                score += 400 + dias_sem_operar * 20
+            if not operou_hoje:
+                score += 100
+            if falta_meta > 0 and c["meta"] > 0:
+                score += min(100, (lucro_conta / c["meta"]) * 100)
+
+            status_contas.append({
+                "id": c["id"],
+                "identificador": f"{c['nome']} ({c['mesa']})",
+                "trader": c["trader"],
+                "mesa": c["mesa"],
+                "tamanho": c["tamanho_conta"],
+                "tipo": c["tipo"],
+                "saldo_inicial": c["saldo_inicial"],
+                "saldo_atual": saldo_conta,
+                "pnl": lucro_conta,
+                "falta_meta": falta_meta,
+                "mam": mam,
+                "dias_sem_operar": dias_sem_operar,
+                "operou_hoje": operou_hoje,
+                "score": score
+            })
+
+        df_radar = pd.DataFrame(status_contas).sort_values(by="score", ascending=False)
+
+        criticas = df_radar[df_radar["dias_sem_operar"] >= 5]
+        if not criticas.empty:
+            for _, cr in criticas.iterrows():
+                dias_txt = "Nunca operada" if cr["dias_sem_operar"] == 99 else f"{cr['dias_sem_operar']} dias sem trade"
+                st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** (Trader: {cr['trader']}) está a **{dias_txt}**! Opere hoje para não quebrar a regra de inatividade.")
+
+        top3 = df_radar.head(3)
+        cols = st.columns(3)
+        for i, (_, row) in enumerate(top3.iterrows()):
+            with cols[i]:
+                titulo = "⭐ MÁXIMA ATENÇÃO: FOCO EM PERFORMANCE" if i == 0 else f"Opção #{i+1} do Dia"
+                st.markdown(f"#### {titulo}")
+                st.info(f"**{row['identificador']}**\n\n👤 Trader: `{row['trader']}` | Tam: `{row['tamanho']}`")
+                
+                d_txt = "Nunca" if row['dias_sem_operar'] == 99 else f"{row['dias_sem_operar']} dias atrás"
+                st.write(f"🕒 **Última Operação:** {d_txt}")
+                st.metric("Saldo Atual", fmt_moeda(row['saldo_atual']), delta=fmt_moeda(row['pnl']))
+                st.metric(f"MAM ({dias_uteis} pregões CME)", f"{fmt_moeda(row['mam'])}/dia")
+
+        st.markdown("---")
+        st.subheader("📋 Resumo Consolidado de Todas as Contas")
+        
+        df_tabela = df_radar.copy()
+        df_tabela["Saldo Inicial"] = df_tabela["saldo_inicial"].apply(fmt_moeda)
+        df_tabela["Saldo Atual"] = df_tabela["saldo_atual"].apply(fmt_moeda)
+        df_tabela["P&L Total"] = df_tabela["pnl"].apply(fmt_moeda)
+        df_tabela["Falta p/ Meta"] = df_tabela["falta_meta"].apply(fmt_moeda)
+        df_tabela["MAM/Dia"] = df_tabela["mam"].apply(fmt_moeda)
+
+        st.dataframe(
+            df_tabela[["identificador", "trader", "mesa", "tamanho", "tipo", "Saldo Inicial", "Saldo Atual", "P&L Total", "Falta p/ Meta", "MAM/Dia"]].rename(
+                columns={"identificador": "Conta", "trader": "Trader", "mesa": "Mesa", "tamanho": "Tamanho", "tipo": "Tipo"}
+            ),
+            use_container_width=True
+        )
+
+# =========================================================
+# 2. MINHAS CONTAS (PAINEL INDIVIDUAL & LANÇAMENTO DE TRADES)
+# =========================================================
+elif menu == "📁 Minhas Contas":
+    if contas_df.empty:
+        st.title("📁 Minhas Contas")
+        st.warning("Cadastre suas contas na aba '⚙️ Gerenciar Contas & Ativos' primeiro.")
+    else:
+        lista_opcoes = [
+            f"{c['id']} - {c['nome']} — {c['mesa']} ({c['tamanho_conta']}) | Trader: {c['trader']}"
+            for _, c in contas_df.iterrows()
         ]
         
-        selecao = st.selectbox("Selecione o Modo de Exibição:", opcoes_seletor)
+        conta_sel = st.selectbox("📂 Selecione a Conta para Acessar:", lista_opcoes)
+        c_id = int(conta_sel.split(" - ")[0])
+        c = contas_df[contas_df["id"] == c_id].iloc[0]
 
-        # -------------------------------------------------
-        # VISÃO GLOBAL
-        # -------------------------------------------------
-        if selecao == "🌐 Visão Global (Todas as Contas)":
-            st.title("🌐 Visão Consolidada de Todas as Contas")
-            
-            total_saldo_inicial = contas_df["saldo_inicial"].sum()
-            total_lucro_global = trades_df["resultado"].sum() if not trades_df.empty else 0.0
-            saldo_global_atual = total_saldo_inicial + total_lucro_global
-            total_saques_global = contas_df["total_saques"].sum()
+        st.title(f"📈 {c['nome']} — {c['mesa']}")
+        st.markdown(f"👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Tipo:** `{c['tipo']}` | **Saques Totais:** `{fmt_moeda(c['total_saques'])}`")
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Resultado Líquido Global", fmt_moeda(total_lucro_global), delta=fmt_moeda(total_lucro_global))
-            c2.metric("Saldo Total sob Gestão", fmt_moeda(saldo_global_atual))
-            c3.metric("Total de Saques Realizados", fmt_moeda(total_saques_global))
-            c4.metric("Contas Cadastradas", len(contas_df))
+        # Abas internas da própria conta
+        tab_painel, tab_lancar = st.tabs(["📊 Desempenho da Conta", "➕ Lançar Trade Nesta Conta"])
 
-            st.markdown("---")
-
-            # RADAR TOP 3
-            st.subheader("🎯 Radar Diário: Contas Recomendadas para Hoje (Máx 3)")
-            st.caption("Foco disciplinado: Evite a inatividade de 7 dias e priorize contas que exigem performance.")
-
-            hoje = date.today()
-            dias_uteis = dias_uteis_cme_restantes()
-            status_contas = []
-
-            for _, c in contas_df.iterrows():
-                t_conta = trades_df[trades_df["conta_id"] == c["id"]]
-                if not t_conta.empty:
-                    ult_data = datetime.strptime(t_conta["data"].max(), "%Y-%m-%d").date()
-                    dias_sem_operar = (hoje - ult_data).days
-                    operou_hoje = (ult_data == hoje)
-                else:
-                    dias_sem_operar = 99
-                    operou_hoje = False
-
-                lucro_conta = t_conta["resultado"].sum() if not t_conta.empty else 0.0
-                saldo_conta = c["saldo_inicial"] + lucro_conta
-                falta_meta = max(0.0, (c["saldo_inicial"] + c["meta"]) - saldo_conta)
-                mam = falta_meta / dias_uteis
-
-                score = 0
-                if dias_sem_operar >= 5:
-                    score += 1500 + dias_sem_operar * 50
-                elif dias_sem_operar >= 3:
-                    score += 400 + dias_sem_operar * 20
-                if not operou_hoje:
-                    score += 100
-                if falta_meta > 0 and c["meta"] > 0:
-                    score += min(100, (lucro_conta / c["meta"]) * 100)
-
-                status_contas.append({
-                    "id": c["id"],
-                    "identificador": f"{c['nome']} ({c['mesa']})",
-                    "trader": c["trader"],
-                    "mesa": c["mesa"],
-                    "tamanho": c["tamanho_conta"],
-                    "tipo": c["tipo"],
-                    "saldo_inicial": c["saldo_inicial"],
-                    "saldo_atual": saldo_conta,
-                    "pnl": lucro_conta,
-                    "falta_meta": falta_meta,
-                    "mam": mam,
-                    "dias_sem_operar": dias_sem_operar,
-                    "operou_hoje": operou_hoje,
-                    "score": score
-                })
-
-            df_radar = pd.DataFrame(status_contas).sort_values(by="score", ascending=False)
-
-            criticas = df_radar[df_radar["dias_sem_operar"] >= 5]
-            if not criticas.empty:
-                for _, cr in criticas.iterrows():
-                    dias_txt = "Nunca operada" if cr["dias_sem_operar"] == 99 else f"{cr['dias_sem_operar']} dias sem trade"
-                    st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** (Trader: {cr['trader']}) está a **{dias_txt}**! Opere hoje para evitar desclassificação.")
-
-            top3 = df_radar.head(3)
-            cols = st.columns(3)
-            for i, (_, row) in enumerate(top3.iterrows()):
-                with cols[i]:
-                    titulo = "⭐ MÁXIMA ATENÇÃO: FOCO EM PERFORMANCE" if i == 0 else f"Opção #{i+1} do Dia"
-                    st.markdown(f"#### {titulo}")
-                    st.info(f"**{row['identificador']}**\n\n👤 Trader: `{row['trader']}` | Tamanho: `{row['tamanho']}`")
-                    
-                    d_txt = "Nunca" if row['dias_sem_operar'] == 99 else f"{row['dias_sem_operar']} dias atrás"
-                    st.write(f"🕒 **Última Operação:** {d_txt}")
-                    st.metric("Saldo Atual", fmt_moeda(row['saldo_atual']), delta=fmt_moeda(row['pnl']))
-                    st.metric(f"MAM ({dias_uteis} pregões CME)", f"{fmt_moeda(row['mam'])}/dia")
-
-            st.markdown("---")
-            st.subheader("📋 Tabela Consolidada de Contas")
-            
-            df_tabela = df_radar.copy()
-            df_tabela["Saldo Inicial"] = df_tabela["saldo_inicial"].apply(fmt_moeda)
-            df_tabela["Saldo Atual"] = df_tabela["saldo_atual"].apply(fmt_moeda)
-            df_tabela["P&L Total"] = df_tabela["pnl"].apply(fmt_moeda)
-            df_tabela["Falta p/ Meta"] = df_tabela["falta_meta"].apply(fmt_moeda)
-            df_tabela["MAM/Dia"] = df_tabela["mam"].apply(fmt_moeda)
-
-            st.dataframe(
-                df_tabela[["identificador", "trader", "mesa", "tamanho", "tipo", "Saldo Inicial", "Saldo Atual", "P&L Total", "Falta p/ Meta", "MAM/Dia"]].rename(
-                    columns={"identificador": "Conta", "trader": "Trader", "mesa": "Mesa", "tamanho": "Tamanho", "tipo": "Tipo"}
-                ),
-                use_container_width=True
-            )
-
-        # -------------------------------------------------
-        # VISÃO INDIVIDUAL
-        # -------------------------------------------------
-        else:
-            idx_selecionado = opcoes_seletor.index(selecao) - 1
-            c = contas_df.iloc[idx_selecionado]
-            c_id = int(c["id"])
-
-            st.title(f"📈 {c['nome']} — {c['mesa']}")
-            st.markdown(f"👤 **Trader Responsável:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Tipo:** `{c['tipo']}` | **Saques:** `{fmt_moeda(c['total_saques'])}`")
-
+        # --- ABA 1: DESEMPENHO E GRÁFICO ---
+        with tab_painel:
             t_conta = trades_df[trades_df["conta_id"] == c_id].copy()
             total_pnl = t_conta["resultado"].sum() if not t_conta.empty else 0.0
             saldo_atual = c["saldo_inicial"] + total_pnl
@@ -268,7 +271,7 @@ if menu == "📊 Painel Principal (Global & Individual)":
                 fig = px.line(t_conta, x="data_formatada", y="Saldo_Acum", title="Curva de Patrimônio ($)", markers=True)
                 st.plotly_chart(fig, use_container_width=True)
 
-                st.subheader("Histórico de Operações")
+                st.subheader("Histórico de Trades Desta Conta")
                 t_view = t_conta.copy()
                 t_view["Data"] = t_view["data"].apply(fmt_data)
                 t_view["Resultado"] = t_view["resultado"].apply(fmt_moeda)
@@ -282,48 +285,41 @@ if menu == "📊 Painel Principal (Global & Individual)":
                 csv = t_conta.to_csv(index=False).encode('utf-8')
                 st.download_button("📥 Baixar Histórico de Trades (CSV)", csv, f"trades_{c['nome']}.csv", "text/csv")
             else:
-                st.info("Nenhuma operação cadastrada para esta conta ainda.")
+                st.info("Nenhuma operação registrada para esta conta ainda. Use a aba ao lado '➕ Lançar Trade Nesta Conta' para registrar seu primeiro trade.")
 
-# =========================================================
-# 2. LANÇAMENTO DE TRADES
-# =========================================================
-elif menu == "➕ Lançar Trade":
-    st.title("➕ Lançamento de Operação")
-    if contas_df.empty:
-        st.warning("Cadastre uma conta antes de lançar operações.")
-    else:
-        lista_contas = [f"{c['id']} - {c['nome']} ({c['mesa']} | {c['tamanho_conta']}) - Trader: {c['trader']}" for _, c in contas_df.iterrows()]
-        conta_sel = st.selectbox("Selecione a Conta", lista_contas)
-        c_id = int(conta_sel.split(" - ")[0])
-
-        with st.form("form_trade"):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                data_trade = st.date_input("Data da Operação (DD/MM/AAAA)", value=date.today(), format="DD/MM/YYYY")
-                ativo = st.selectbox("Ativo Operado", ativos_df["nome"].tolist())
-            with c2:
-                lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=1.0, step=0.5)
-                resultado_str = st.text_input("Resultado Líquido ($) (ex: 250,00 ou -150,00)", value="0,00")
-            with c3:
-                duracao = st.number_input("Duração da Operação (Minutos)", min_value=1, value=15, step=1)
-                estrategia = st.selectbox("Estratégia", estrategias_df["nome"].tolist())
-
-            notas = st.text_area("Notas Operacionais (Gatilho técnico, lições)")
-            salvar = st.form_submit_button("Salvar Trade")
+        # --- ABA 2: LANÇAR TRADE DIRETO NA CONTA ---
+        with tab_lancar:
+            st.subheader(f"Registrar Operação para: {c['nome']} ({c['mesa']})")
             
-            if salvar:
-                try:
-                    resultado_val = converter_br_para_float(resultado_str)
-                    cursor.execute("""
-                    INSERT INTO trades (conta_id, data, ativo, lotes, resultado, duracao_min, estrategia, notas)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (c_id, str(data_trade), ativo, lotes, resultado_val, duracao, estrategia, notas))
-                    conn.commit()
-                    st.toast("Atualizado", icon="✅")
-                    st.success("Trade registrado com sucesso!")
-                except Exception as e:
-                    st.toast("Erro, e tente novamente", icon="❌")
-                    st.error("Erro, e tente novamente. Verifique os valores preenchidos.")
+            with st.form("form_trade_conta"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    data_trade = st.date_input("Data do Pregão (DD/MM/AAAA)", value=date.today(), format="DD/MM/YYYY")
+                    ativo = st.selectbox("Ativo Operado", ativos_df["nome"].tolist())
+                with c2:
+                    lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=1.0, step=0.5)
+                    resultado_str = st.text_input("Resultado Líquido ($) (ex: 250,00 ou -150,00)", value="0,00")
+                with c3:
+                    duracao = st.number_input("Duração da Operação (Minutos)", min_value=1, value=15, step=1)
+                    estrategia = st.selectbox("Estratégia", estrategias_df["nome"].tolist())
+
+                notas = st.text_area("Observações Técnicas / Psicológicas do Trade")
+                salvar_trade = st.form_submit_button("Salvar Operação Nesta Conta")
+
+                if salvar_trade:
+                    try:
+                        res_float = converter_br_para_float(resultado_str)
+                        cursor.execute("""
+                        INSERT INTO trades (conta_id, data, ativo, lotes, resultado, duracao_min, estrategia, notas)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (c_id, str(data_trade), ativo, lotes, res_float, duracao, estrategia, notas))
+                        conn.commit()
+                        st.toast("Atualizado", icon="✅")
+                        st.success("Trade registrado com sucesso nesta conta!")
+                        st.rerun()
+                    except Exception:
+                        st.toast("Erro, e tente novamente", icon="❌")
+                        st.error("Erro, e tente novamente. Verifique se digitou os valores corretamente.")
 
 # =========================================================
 # 3. REGRAS E COMPLIANCE DA MESA
