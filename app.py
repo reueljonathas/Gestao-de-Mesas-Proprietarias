@@ -265,7 +265,8 @@ elif menu == "📁 Minhas Contas":
         st.title(f"📈 {c['nome']} — {c['mesa']}")
         st.markdown(f"👤 **Trader:** `{c['trader']}` | **Tamanho:** `{c['tamanho_conta']}` | **Tipo:** `{c['tipo']}` | **Saques Totais:** `{fmt_moeda(c['total_saques'])}`")
 
-        tab_painel, tab_lancar, tab_gerenciar = st.tabs(["📊 Desempenho da Conta", "➕ Lançar Trade Nesta Conta", "⚙️ Opções da Conta"])
+        # Aba renomeada para "➕ Lançar Trade"
+        tab_painel, tab_lancar, tab_gerenciar = st.tabs(["📊 Desempenho da Conta", "➕ Lançar Trade", "⚙️ Opções da Conta"])
 
         # --- ABA 1: DESEMPENHO E HISTÓRICO ---
         with tab_painel:
@@ -310,33 +311,33 @@ elif menu == "📁 Minhas Contas":
             else:
                 st.info("Nenhuma operação registrada para esta conta ainda.")
 
-        # --- ABA 2: LANÇAR TRADE ---
+        # --- ABA 2: LANÇAR TRADE (CAMPOS TOTALMENTE NEUTROS / LIMPOS) ---
         with tab_lancar:
             st.subheader(f"Registrar Operação: {c['nome']} ({c['mesa']})")
 
             c1, c2, c3 = st.columns(3)
             with c1:
                 data_trade = st.date_input("Data do Pregão (DD/MM/AAAA)", value=date.today(), format="DD/MM/YYYY")
-                lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=1.0, step=0.5)
+                lotes = st.number_input("Qtd. de Contratos (Lotes)", min_value=0.1, value=None, step=0.5, placeholder="Informe os lotes (ex: 1.0)")
 
             with c2:
-                ativo = st.selectbox("Ativo Operado", ativos_df["nome"].tolist())
-                resultado_str = st.text_input("Resultado Líquido ($) (ex: 250,00 ou -150,00)", value="0,00")
+                ativo = st.selectbox("Ativo Operado", ativos_df["nome"].tolist(), index=None, placeholder="Selecione o Ativo...")
+                resultado_str = st.text_input("Resultado Líquido ($)", value="", placeholder="ex: 250,00 ou -150,00")
 
             with c3:
-                estrategia = st.selectbox("Estratégia Utilizada", estrategias_df["nome"].tolist())
+                estrategia = st.selectbox("Estratégia Utilizada", estrategias_df["nome"].tolist(), index=None, placeholder="Selecione a Estratégia...")
                 st.markdown("**Duração da Operação**")
                 cd1, cd2, cd3 = st.columns(3)
                 with cd1:
                     dur_h = st.number_input("Horas", min_value=0, max_value=72, value=0, step=1)
                 with cd2:
-                    dur_m = st.number_input("Min", min_value=0, max_value=59, value=5, step=1)
+                    dur_m = st.number_input("Min", min_value=0, max_value=59, value=0, step=1)
                 with cd3:
-                    dur_s = st.number_input("Seg", min_value=0, max_value=59, value=0, step=5)
+                    dur_s = st.number_input("Seg", min_value=0, max_value=59, value=0, step=1)
 
-            notas = st.text_area("Observações Técnicas / Psicológicas do Trade")
+            notas = st.text_area("Observações Técnicas / Psicológicas do Trade", placeholder="Descreva os motivos da entrada, gatilho, disciplina ou erros...")
 
-            st.write("") # Espaçamento visual
+            st.write("") # Espaçamento
 
             # BOTÕES LADO A LADO: SALVAR | NOVO ATIVO | NOVA ESTRATÉGIA
             col_salvar, col_add_ativo, col_add_est = st.columns([1, 1.2, 1.2])
@@ -376,9 +377,18 @@ elif menu == "📁 Minhas Contas":
                                 st.toast("Erro, e tente novamente", icon="❌")
                                 st.error("Esta estratégia já existe.")
 
-            # Processamento do Salvar Trade
+            # Processamento com Validações
             if btn_salvar:
                 try:
+                    if not ativo:
+                        raise ValueError("Por favor, selecione o Ativo Operado.")
+                    if not estrategia:
+                        raise ValueError("Por favor, selecione a Estratégia Utilizada.")
+                    if lotes is None or lotes <= 0:
+                        raise ValueError("Informe a Quantidade de Contratos (Lotes).")
+                    if not resultado_str.strip():
+                        raise ValueError("Informe o Resultado Líquido do trade.")
+
                     res_float = converter_br_para_float(resultado_str)
                     duracao_formatada = formatar_duracao(dur_h, dur_m, dur_s)
                     
@@ -390,6 +400,9 @@ elif menu == "📁 Minhas Contas":
                     st.toast("Atualizado", icon="✅")
                     st.success("Trade registrado com sucesso!")
                     st.rerun()
+                except ValueError as ve:
+                    st.toast("Erro, e tente novamente", icon="❌")
+                    st.error(f"Atenção: {str(ve)}")
                 except Exception:
                     st.toast("Erro, e tente novamente", icon="❌")
                     st.error("Erro, e tente novamente. Verifique os valores inseridos.")
