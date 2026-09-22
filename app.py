@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import sqlite3
 import calendar
 import json
+import os
 import re
 from datetime import date, datetime, timedelta
 from supabase import create_client, Client
@@ -11,13 +13,27 @@ from supabase import create_client, Client
 # Configuração da página
 st.set_page_config(page_title="Gestão de Mesas CME", layout="wide", page_icon="📈")
 
-# --- CONEXÃO COM SUPABASE VIA SECRETS ---
+# --- CONEXÃO INTELIGENTE COM SUPABASE VIA SECRETS ---
 try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-except Exception:
-    st.error("🚨 Chaves do Supabase não configuradas nos Secrets do Streamlit! Siga o Passo 5 das instruções para conectar.")
+    # Busca com tolerância a maiúsculas/minúsculas
+    sb_url = st.secrets.get("SUPABASE_URL") or st.secrets.get("supabase_url")
+    sb_key = st.secrets.get("SUPABASE_KEY") or st.secrets.get("supabase_key")
+
+    # Caso o usuário tenha criado uma seção [supabase]
+    if not sb_url and "supabase" in st.secrets:
+        sb_url = st.secrets["supabase"].get("url") or st.secrets["supabase"].get("SUPABASE_URL") or st.secrets["supabase"].get("supabase_url")
+        sb_key = st.secrets["supabase"].get("key") or st.secrets["supabase"].get("SUPABASE_KEY") or st.secrets["supabase"].get("supabase_key")
+
+    if not sb_url or not sb_key:
+        chaves_encontradas = list(st.secrets.keys()) if hasattr(st.secrets, "keys") else []
+        st.error(f"🚨 Chaves não encontradas! Chaves lidas atualmente no seu Secrets: {chaves_encontradas}")
+        st.info("Certifique-se de salvar exatamente: SUPABASE_URL = \"...\" e SUPABASE_KEY = \"...\" nas configurações de Secrets.")
+        st.stop()
+
+    supabase: Client = create_client(str(sb_url).strip(), str(sb_key).strip())
+except Exception as err_conexao:
+    st.error(f"🚨 Erro na conexão com o Supabase: {str(err_conexao)}")
+    st.info("Dica: Verifique se a URL começa com https:// e se a chave anon não contém quebras de linha ou aspas faltando.")
     st.stop()
 
 # --- ESTILIZAÇÃO PARA MENU LATERAL EM QUADRADOS ---
@@ -153,7 +169,6 @@ def carregar_dados():
     df_a = pd.DataFrame(ativos_res.data) if ativos_res.data else pd.DataFrame(columns=["nome"])
     df_e = pd.DataFrame(estrategias_res.data) if estrategias_res.data else pd.DataFrame(columns=["nome"])
 
-    # Converter numéricos
     for col in ["saldo_inicial", "max_dd", "limite_diario", "meta", "custo_mesa", "custo_ativacao", "custo_reset", "outros_custos", "total_saques"]:
         if col in df_c.columns:
             df_c[col] = pd.to_numeric(df_c[col], errors="coerce").fillna(0.0)
@@ -655,7 +670,6 @@ elif menu == "📁 Minhas Contas":
                     cst_float = converter_br_para_float(custos_str)
                     duracao_formatada = formatar_duracao(dur_h, dur_m, dur_s)
 
-                    # Checagem Anti-Duplicação
                     t_dup = supabase.table("trades").select("id").match({
                         "conta_id": c_id, "data": str(data_trade), "ativo": ativo,
                         "lotes": lotes, "resultado": res_float, "direcao": direcao
@@ -1176,7 +1190,6 @@ elif menu == "💾 Backup":
     if st.button("Zerar Sistema no Supabase"):
         if chk_reset_total:
             try:
-                # Deletar dados no Supabase
                 supabase.table("trades").delete().neq("id", 0).execute()
                 supabase.table("saques").delete().neq("id", 0).execute()
                 supabase.table("contas").delete().neq("id", 0).execute()
@@ -1321,7 +1334,6 @@ elif menu == "➕ Cadastrar":
             if not meta_str.strip():
                 raise ValueError("Informe a Meta de Lucro ($).")
 
-            # Checagem Anti-Duplicação no Supabase
             c_dup = supabase.table("contas").select("id").match({
                 "nome": nome.strip(), "mesa": mesa.strip()
             }).execute()
