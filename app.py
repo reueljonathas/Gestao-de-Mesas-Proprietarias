@@ -2,15 +2,23 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import sqlite3
 import calendar
 import json
-import os
 import re
 from datetime import date, datetime, timedelta
+from supabase import create_client, Client
 
 # Configuração da página
 st.set_page_config(page_title="Gestão de Mesas CME", layout="wide", page_icon="📈")
+
+# --- CONEXÃO COM SUPABASE VIA SECRETS ---
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception:
+    st.error("🚨 Chaves do Supabase não configuradas nos Secrets do Streamlit! Siga o Passo 5 das instruções para conectar.")
+    st.stop()
 
 # --- ESTILIZAÇÃO PARA MENU LATERAL EM QUADRADOS ---
 st.markdown("""
@@ -31,15 +39,15 @@ st.markdown("""
 def fmt_moeda(valor):
     if valor is None or pd.isna(valor):
         return "$ 0,00"
-    sinal = "-" if valor < 0 else ""
-    val_abs = abs(valor)
+    sinal = "-" if float(valor) < 0 else ""
+    val_abs = abs(float(valor))
     formatado = f"{val_abs:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{sinal}$ {formatado}"
 
 def fmt_br_input(valor):
     if valor is None or pd.isna(valor):
         return "0,00"
-    sinal = "-" if valor < 0 else ""
+    sinal = "-" if float(valor) < 0 else ""
     val_abs = abs(float(valor))
     formatado = f"{val_abs:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{sinal}{formatado}"
@@ -121,7 +129,47 @@ def parse_display_duracao(val):
     except:
         return s_val
 
-# --- CÁLCULOS DE DIAS ÚTEIS E PREGÕES CME ---
+# --- CARREGAR DADOS DO SUPABASE ---
+def carregar_dados():
+    contas_res = supabase.table("contas").select("*").order("id", desc=False).execute()
+    trades_res = supabase.table("trades").select("*").order("id", desc=False).execute()
+    saques_res = supabase.table("saques").select("*").order("id", desc=False).execute()
+    ativos_res = supabase.table("ativos").select("nome").order("nome", desc=False).execute()
+    estrategias_res = supabase.table("estrategias").select("nome").order("nome", desc=False).execute()
+
+    df_c = pd.DataFrame(contas_res.data) if contas_res.data else pd.DataFrame(columns=[
+        "id", "nome", "trader", "mesa", "tamanho_conta", "tipo", "status",
+        "saldo_inicial", "max_dd", "limite_diario", "meta", "custo_mesa",
+        "custo_ativacao", "custo_reset", "outros_custos", "total_saques",
+        "data_inicio_janela", "prazo_avaliacao"
+    ])
+    df_t = pd.DataFrame(trades_res.data) if trades_res.data else pd.DataFrame(columns=[
+        "id", "conta_id", "data", "ativo", "direcao", "lotes", "pontos",
+        "custos", "resultado", "duracao_min", "estrategia", "notas"
+    ])
+    df_s = pd.DataFrame(saques_res.data) if saques_res.data else pd.DataFrame(columns=[
+        "id", "conta_id", "data_solicitacao", "valor", "notas"
+    ])
+    df_a = pd.DataFrame(ativos_res.data) if ativos_res.data else pd.DataFrame(columns=["nome"])
+    df_e = pd.DataFrame(estrategias_res.data) if estrategias_res.data else pd.DataFrame(columns=["nome"])
+
+    # Converter numéricos
+    for col in ["saldo_inicial", "max_dd", "limite_diario", "meta", "custo_mesa", "custo_ativacao", "custo_reset", "outros_custos", "total_saques"]:
+        if col in df_c.columns:
+            df_c[col] = pd.to_numeric(df_c[col], errors="coerce").fillna(0.0)
+            
+    for col in ["lotes", "pontos", "custos", "resultado"]:
+        if col in df_t.columns:
+            df_t[col] = pd.to_numeric(df_t[col], errors="coerce").fillna(0.0)
+
+    if "valor" in df_s.columns:
+        df_s["valor"] = pd.to_numeric(df_s["valor"], errors="coerce").fillna(0.0)
+
+    return df_c, df_t, df_s, df_a, df_e
+
+contas_df, trades_df, saques_df, ativos_df, estrategias_df = carregar_dados()
+
+# --- CÁLCULO PREGÕES CME RESTANTES ---
 def dias_uteis_mes_atual():
     hoje = date.today()
     _, ultimo_dia = calendar.monthrange(hoje.year, hoje.month)
@@ -143,130 +191,25 @@ def dias_uteis_ate_limite(data_limite):
         cur += timedelta(days=1)
     return max(1, uteis)
 
-# --- BANCO DE DADOS FIXO COM AUTO-MIGRAÇÃO ---
-DB_NAME = "mesas_pro.db"
-
-if not os.path.exists(DB_NAME):
-    for legado in ["mesas_v5.db", "mesas_v4.db", "mesas.db"]:
-        if os.path.exists(legado):
-            try:
-                import shutil
-                shutil.copyfile(legado, DB_NAME)
-                break
-            except:
-                pass
-
-conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS contas (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nome TEXT,
-    trader TEXT,
-    mesa TEXT,
-    tamanho_conta TEXT,
-    tipo TEXT,
-    status TEXT DEFAULT 'Challenge (avaliação)',
-    saldo_inicial REAL,
-    max_dd REAL,
-    limite_diario REAL,
-    meta REAL,
-    custo_mesa REAL DEFAULT 0.0,
-    custo_ativacao REAL DEFAULT 0.0,
-    custo_reset REAL DEFAULT 0.0,
-    outros_custos REAL DEFAULT 0.0,
-    total_saques REAL DEFAULT 0.0,
-    data_inicio_janela TEXT,
-    prazo_avaliacao TEXT DEFAULT 'Sem prazo máximo (Indeterminado / Ylos)'
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conta_id INTEGER,
-    data TEXT,
-    ativo TEXT,
-    direcao TEXT DEFAULT 'Compra (Long)',
-    lotes REAL,
-    pontos REAL DEFAULT 0.0,
-    custos REAL DEFAULT 0.0,
-    resultado REAL,
-    duracao_min TEXT,
-    estrategia TEXT,
-    notas TEXT,
-    FOREIGN KEY(conta_id) REFERENCES contas(id)
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS saques (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conta_id INTEGER,
-    data_solicitacao TEXT,
-    valor REAL,
-    notas TEXT,
-    FOREIGN KEY(conta_id) REFERENCES contas(id)
-)
-""")
-
-cursor.execute("CREATE TABLE IF NOT EXISTS ativos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
-cursor.execute("CREATE TABLE IF NOT EXISTS estrategias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
-
-# Migração de colunas
-cursor.execute("PRAGMA table_info(contas)")
-c_cols = [r[1] for r in cursor.fetchall()]
-if "prazo_avaliacao" not in c_cols:
-    cursor.execute("ALTER TABLE contas ADD COLUMN prazo_avaliacao TEXT DEFAULT 'Sem prazo máximo (Indeterminado / Ylos)'")
-
-cursor.execute("PRAGMA table_info(trades)")
-t_cols = [r[1] for r in cursor.fetchall()]
-if "direcao" not in t_cols:
-    cursor.execute("ALTER TABLE trades ADD COLUMN direcao TEXT DEFAULT 'Compra (Long)'")
-if "pontos" not in t_cols:
-    cursor.execute("ALTER TABLE trades ADD COLUMN pontos REAL DEFAULT 0.0")
-if "custos" not in t_cols:
-    cursor.execute("ALTER TABLE trades ADD COLUMN custos REAL DEFAULT 0.0")
-
-cursor.execute("SELECT COUNT(*) FROM ativos")
-if cursor.fetchone()[0] == 0:
-    for a in ["NQ (Nasdaq)", "ES (S&P 500)", "YM (Dow)", "CL (Petróleo)", "GC (Ouro)", "RTY (Russell)"]:
-        cursor.execute("INSERT OR IGNORE INTO ativos (nome) VALUES (?)", (a,))
-
-cursor.execute("SELECT COUNT(*) FROM estrategias")
-if cursor.fetchone()[0] == 0:
-    for e in ["Rompimento", "Pullback / Tendência", "Reversão / VWAP", "Scalping", "Abertura / Notícia"]:
-        cursor.execute("INSERT OR IGNORE INTO estrategias (nome) VALUES (?)", (e,))
-
-conn.commit()
-
-contas_df = pd.read_sql("SELECT * FROM contas", conn)
-trades_df = pd.read_sql("SELECT * FROM trades", conn)
-saques_df = pd.read_sql("SELECT * FROM saques", conn)
-ativos_df = pd.read_sql("SELECT nome FROM ativos ORDER BY nome ASC", conn)
-estrategias_df = pd.read_sql("SELECT nome FROM estrategias ORDER BY nome ASC", conn)
-
-# --- CÁLCULO MAM DINÂMICO ---
 def calcular_mam_conta(c, saldo_atual):
     alvo = c["saldo_inicial"] + c["meta"]
     falta_meta = max(0.0, alvo - saldo_atual)
     prazo = c.get("prazo_avaliacao", "Sem prazo máximo (Indeterminado / Ylos)")
     mesa_low = str(c.get("mesa", "")).strip().lower()
 
-    if "ylos" in mesa_low or "sem prazo" in prazo.lower():
+    if "ylos" in mesa_low or "sem prazo" in str(prazo).lower():
         dias_uteis = dias_uteis_mes_atual()
         mam = falta_meta / dias_uteis
         info_txt = f"{dias_uteis} pregões neste mês (Mês renovável)"
         dias_expira = None
-    elif "30 dias" in prazo:
+    elif "30 dias" in str(prazo):
         dt_ini = datetime.strptime(c["data_inicio_janela"], "%Y-%m-%d").date() if c["data_inicio_janela"] else date.today()
         dt_lim = dt_ini + timedelta(days=30)
         dias_expira = (dt_lim - date.today()).days
         dias_uteis = dias_uteis_ate_limite(dt_lim)
         mam = falta_meta / max(1, dias_uteis)
         info_txt = f"{dias_uteis} pregões até o prazo de 30 dias"
-    elif "60 dias" in prazo:
+    elif "60 dias" in str(prazo):
         dt_ini = datetime.strptime(c["data_inicio_janela"], "%Y-%m-%d").date() if c["data_inicio_janela"] else date.today()
         dt_lim = dt_ini + timedelta(days=60)
         dias_expira = (dt_lim - date.today()).days
@@ -275,11 +218,11 @@ def calcular_mam_conta(c, saldo_atual):
         info_txt = f"{dias_uteis} pregões até o prazo de 60 dias"
     else:
         try:
-            dt_lim = datetime.strptime(prazo, "%Y-%m-%d").date()
+            dt_lim = datetime.strptime(str(prazo), "%Y-%m-%d").date()
             dias_expira = (dt_lim - date.today()).days
             dias_uteis = dias_uteis_ate_limite(dt_lim)
             mam = falta_meta / max(1, dias_uteis)
-            info_txt = f"{dias_uteis} pregões até {fmt_data(prazo)}"
+            info_txt = f"{dias_uteis} pregões até {fmt_data(str(prazo))}"
         except:
             dias_uteis = dias_uteis_mes_atual()
             mam = falta_meta / dias_uteis
@@ -288,7 +231,7 @@ def calcular_mam_conta(c, saldo_atual):
 
     return mam, falta_meta, info_txt, dias_expira
 
-# --- NAVEGAÇÃO LATERAL EM QUADRADOS ---
+# --- MENU LATERAL ---
 if "menu" not in st.session_state:
     st.session_state.menu = "📊 Painel Geral"
 
@@ -322,7 +265,7 @@ if menu == "📊 Painel Geral":
     st.title("📊 Painel Geral Consolidado")
     
     if contas_df.empty:
-        st.info("👋 Nenhuma conta cadastrada ainda. Acesse **'➕ Cadastrar'** para começar!")
+        st.info("👋 Nenhuma conta cadastrada ainda no Supabase. Acesse **'➕ Cadastrar'** para começar!")
     else:
         total_saldo_inicial = contas_df["saldo_inicial"].sum()
         total_lucro_global = trades_df["resultado"].sum() if not trades_df.empty else 0.0
@@ -346,7 +289,6 @@ if menu == "📊 Painel Geral":
         for _, c in contas_df.iterrows():
             t_conta = trades_df[trades_df["conta_id"] == c["id"]]
             
-            # Checagem se a conta já operou hoje
             if not t_conta.empty:
                 ult_data = datetime.strptime(t_conta["data"].max(), "%Y-%m-%d").date()
                 dias_sem_operar = (hoje - ult_data).days
@@ -400,36 +342,31 @@ if menu == "📊 Painel Geral":
 
         df_radar = pd.DataFrame(status_contas).sort_values(by="score", ascending=False)
 
-        # Alerta de inatividade apenas para quem ainda não operou
         criticas = df_radar[(df_radar["dias_sem_operar"] >= 5) & (df_radar["operou_hoje"] == False)]
         if not criticas.empty:
             for _, cr in criticas.iterrows():
                 dias_txt = "Nunca operada" if cr["dias_sem_operar"] == 99 else f"{cr['dias_sem_operar']} dias sem trade"
                 st.error(f"⚠️ **ALERTA CRÍTICO (Regra dos 7 Dias):** A conta **{cr['identificador']}** está a **{dias_txt}**! Opere hoje para evitar desclassificação.")
 
-        # Alerta de prazo de expiração para quem não bateu meta
         expirando = df_radar[(df_radar["dias_expira"].notnull()) & (df_radar["dias_expira"] <= 7)]
         if not expirando.empty:
             for _, ex in expirando.iterrows():
                 if ex["dias_expira"] < 0:
-                    st.error(f"🚨 **PRAZO ESGOTADO:** A conta **{ex['identificador']}** ultrapassou o prazo da mesa ({abs(ex['dias_expira'])} dias expirada)!")
+                    st.error(f"🚨 **PRAZO ESGOTADO:** A conta **{ex['identificador']}** ultrapassou o prazo ({abs(ex['dias_expira'])} dias expirada)!")
                 else:
                     st.warning(f"⏳ **PRAZO DE APROVAÇÃO ACABANDO:** Faltam **{ex['dias_expira']} dias corridos** para expirar a conta **{ex['identificador']}**!")
 
-        # FILTRO INTELIGENTE: MOSTRA APENAS AS CONTAS QUE AINDA PRECISAM SER OPERADAS HOJE
         df_pendentes = df_radar[df_radar["operou_hoje"] == False]
 
         if df_pendentes.empty:
             st.success("🎉 **Excelente! Todas as contas já foram operadas hoje e cumpriram a regra de atividade!** Não há contas pendentes para negociação no momento. Bom descanso!")
         else:
             top_pendentes = df_pendentes.head(3)
-            qtd_cols = len(top_pendentes)
-            cols = st.columns(qtd_cols)
+            cols = st.columns(len(top_pendentes))
             
             for i, (_, row) in enumerate(top_pendentes.iterrows()):
                 with cols[i]:
                     ultimos_digitos = extrair_ultimos_digitos(row['nome_original'])
-                    
                     st.markdown(f"### Conta #{i+1} do dia ({ultimos_digitos})")
                     st.markdown(f"👤 **Trader:** `{row['trader']}` &nbsp;|&nbsp; ⏳ **Prazo:** `{row['prazo']}`")
                     st.info(f"**Identificação:** `{row['identificador']}`\n\n📌 **Modelo:** `{row['tipo']}` ({row['tamanho']}) | **Fase:** `{row['status']}`")
@@ -646,26 +583,33 @@ elif menu == "📁 Minhas Contas":
                                     pts_f = converter_br_para_float(ed_pontos)
                                     cst_f = converter_br_para_float(ed_custos)
                                     dur_str = formatar_duracao(ed_h, ed_m, ed_s)
-                                    cursor.execute("""
-                                    UPDATE trades SET data=?, ativo=?, direcao=?, lotes=?, pontos=?, custos=?, resultado=?, duracao_min=?, estrategia=?, notas=?
-                                    WHERE id=?
-                                    """, (str(ed_data), ed_ativo, ed_dir, ed_lotes, pts_f, cst_f, res_f, dur_str, ed_est, ed_notas, t_id))
-                                    conn.commit()
-                                    st.toast("Atualizado", icon="✅")
+                                    
+                                    supabase.table("trades").update({
+                                        "data": str(ed_data),
+                                        "ativo": ed_ativo,
+                                        "direcao": ed_dir,
+                                        "lotes": ed_lotes,
+                                        "pontos": pts_f,
+                                        "custos": cst_f,
+                                        "resultado": res_f,
+                                        "duracao_min": dur_str,
+                                        "estrategia": ed_est,
+                                        "notas": ed_notas
+                                    }).eq("id", t_id).execute()
+                                    
+                                    st.toast("Atualizado no Supabase!", icon="✅")
                                     st.success("Trade atualizado!")
                                     st.rerun()
-                                except Exception:
-                                    st.toast("Erro, e tente novamente", icon="❌")
+                                except Exception as e:
+                                    st.toast(f"Erro: {str(e)}", icon="❌")
                         with col_btn_del:
                             if st.button("🗑️ Excluir Este Trade", key=f"btn_del_tr_{t_id}"):
                                 try:
-                                    cursor.execute("DELETE FROM trades WHERE id=?", (t_id,))
-                                    conn.commit()
-                                    st.toast("Atualizado", icon="✅")
-                                    st.success("Trade excluído!")
+                                    supabase.table("trades").delete().eq("id", t_id).execute()
+                                    st.toast("Trade excluído!", icon="✅")
                                     st.rerun()
-                                except Exception:
-                                    st.toast("Erro, e tente novamente", icon="❌")
+                                except Exception as e:
+                                    st.toast(f"Erro: {str(e)}", icon="❌")
 
             with col_add_ativo:
                 with st.popover("➕ Novo Ativo", use_container_width=True):
@@ -674,14 +618,11 @@ elif menu == "📁 Minhas Contas":
                     if st.button("Confirmar Ativo", key="btn_conf_ativo"):
                         if nome_novo_ativo:
                             try:
-                                cursor.execute("INSERT INTO ativos (nome) VALUES (?)", (nome_novo_ativo.strip(),))
-                                conn.commit()
-                                st.toast("Atualizado", icon="✅")
-                                st.success(f"Ativo '{nome_novo_ativo}' adicionado!")
+                                supabase.table("ativos").insert({"nome": nome_novo_ativo.strip()}).execute()
+                                st.toast("Ativo salvo no Supabase!", icon="✅")
                                 st.rerun()
                             except Exception:
-                                st.toast("Erro, e tente novamente", icon="❌")
-                                st.error("Este ativo já existe.")
+                                st.toast("Este ativo já existe.", icon="❌")
 
             with col_add_est:
                 with st.popover("➕ Nova Estratégia", use_container_width=True):
@@ -690,14 +631,11 @@ elif menu == "📁 Minhas Contas":
                     if st.button("Confirmar Estratégia", key="btn_conf_est"):
                         if nome_nova_est:
                             try:
-                                cursor.execute("INSERT INTO estrategias (nome) VALUES (?)", (nome_nova_est.strip(),))
-                                conn.commit()
-                                st.toast("Atualizado", icon="✅")
-                                st.success(f"Estratégia '{nome_nova_est}' adicionada!")
+                                supabase.table("estrategias").insert({"nome": nome_nova_est.strip()}).execute()
+                                st.toast("Estratégia salva no Supabase!", icon="✅")
                                 st.rerun()
                             except Exception:
-                                st.toast("Erro, e tente novamente", icon="❌")
-                                st.error("Esta estratégia já existe.")
+                                st.toast("Esta estratégia já existe.", icon="❌")
 
             if btn_salvar:
                 try:
@@ -717,32 +655,32 @@ elif menu == "📁 Minhas Contas":
                     cst_float = converter_br_para_float(custos_str)
                     duracao_formatada = formatar_duracao(dur_h, dur_m, dur_s)
 
-                    cursor.execute("""
-                    SELECT id FROM trades 
-                    WHERE conta_id = ? AND data = ? AND ativo = ? AND lotes = ? AND resultado = ? AND direcao = ?
-                    """, (c_id, str(data_trade), ativo, lotes, res_float, direcao))
-                    trade_duplicado = cursor.fetchone()
+                    # Checagem Anti-Duplicação
+                    t_dup = supabase.table("trades").select("id").match({
+                        "conta_id": c_id, "data": str(data_trade), "ativo": ativo,
+                        "lotes": lotes, "resultado": res_float, "direcao": direcao
+                    }).execute()
 
-                    if trade_duplicado:
+                    if t_dup.data:
                         st.toast("Operação repetida prevenida!", icon="⚠️")
-                        st.warning("⚠️ **Prevenção de Duplicação:** Uma operação idêntica com este ativo e resultado já foi salva nesta conta hoje. O duplo clique foi prevenido.")
+                        st.warning("⚠️ **Prevenção de Duplicação:** Uma operação idêntica com este ativo e resultado já foi salva hoje.")
                     else:
-                        cursor.execute("""
-                        INSERT INTO trades (conta_id, data, ativo, direcao, lotes, pontos, custos, resultado, duracao_min, estrategia, notas)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (c_id, str(data_trade), ativo, direcao, lotes, pts_float, cst_float, res_float, duracao_formatada, estrategia, notas))
-                        conn.commit()
-                        st.toast("Atualizado", icon="✅")
+                        supabase.table("trades").insert({
+                            "conta_id": c_id, "data": str(data_trade), "ativo": ativo,
+                            "direcao": direcao, "lotes": lotes, "pontos": pts_float,
+                            "custos": cst_float, "resultado": res_float,
+                            "duracao_min": duracao_formatada, "estrategia": estrategia,
+                            "notas": notas
+                        }).execute()
+                        st.toast("Salvo no Supabase!", icon="✅")
                         st.success("Trade registrado com sucesso!")
                         st.rerun()
                 except ValueError as ve:
-                    st.toast("Erro, e tente novamente", icon="❌")
-                    st.error(f"Atenção: {str(ve)}")
+                    st.toast(f"Atenção: {str(ve)}", icon="❌")
                 except Exception as e:
-                    st.toast("Erro, e tente novamente", icon="❌")
-                    st.error(f"Erro ao salvar: {str(e)}")
+                    st.toast(f"Erro: {str(e)}", icon="❌")
 
-        # --- ABA EXCLUSIVA DE SAQUES (APENAS CONTAS FUNDED OU LIVE) ---
+        # --- ABA EXCLUSIVA DE SAQUES (FUNDED OU LIVE) ---
         if is_financiada:
             with tab_saques:
                 st.subheader(f"💸 Gestão de Saques: {c['nome']} ({c['mesa']})")
@@ -775,24 +713,22 @@ elif menu == "📁 Minhas Contas":
                             if val_saque_f <= 0:
                                 raise ValueError("O valor do saque deve ser maior que zero.")
 
-                            cursor.execute("""
-                            INSERT INTO saques (conta_id, data_solicitacao, valor, notas)
-                            VALUES (?, ?, ?, ?)
-                            """, (c_id, str(data_saque), val_saque_f, notas_saque))
+                            supabase.table("saques").insert({
+                                "conta_id": c_id, "data_solicitacao": str(data_saque),
+                                "valor": val_saque_f, "notas": notas_saque
+                            }).execute()
 
                             novo_total_saques = float(c["total_saques"]) + val_saque_f
-                            cursor.execute("""
-                            UPDATE contas SET total_saques=?, data_inicio_janela=?
-                            WHERE id=?
-                            """, (novo_total_saques, str(data_saque), c_id))
+                            supabase.table("contas").update({
+                                "total_saques": novo_total_saques,
+                                "data_inicio_janela": str(data_saque)
+                            }).eq("id", c_id).execute()
 
-                            conn.commit()
-                            st.toast("Atualizado", icon="✅")
-                            st.success(f"Saque de {fmt_moeda(val_saque_f)} registrado com sucesso! A nova janela de consistência começou em {fmt_data(str(data_saque))}.")
+                            st.toast("Saque salvo no Supabase!", icon="✅")
+                            st.success("Saque registrado com sucesso!")
                             st.rerun()
                         except Exception as e:
-                            st.toast("Erro, e tente novamente", icon="❌")
-                            st.error(f"Erro ao registrar saque: {str(e)}")
+                            st.toast(f"Erro: {str(e)}", icon="❌")
 
                 if not saques_conta.empty:
                     st.markdown("---")
@@ -858,50 +794,39 @@ elif menu == "📁 Minhas Contas":
                         dt_janela_val = datetime.strptime(c['data_inicio_janela'], "%Y-%m-%d").date() if c['data_inicio_janela'] else date.today()
                         ed_dt_janela = st.date_input("Início da Janela / Operações", value=dt_janela_val, format="DD/MM/YYYY")
 
-                    salvar_ed_conta = st.form_submit_button("💾 Salvar Alterações da Conta")
+                    salvar_ed_conta = st.form_submit_button("💾 Salvar Alterações no Supabase")
                     if salvar_ed_conta:
                         try:
-                            cursor.execute("""
-                            UPDATE contas SET nome=?, trader=?, mesa=?, tamanho_conta=?, tipo=?, status=?, saldo_inicial=?, max_dd=?, limite_diario=?, meta=?, custo_mesa=?, custo_ativacao=?, custo_reset=?, outros_custos=?, data_inicio_janela=?, prazo_avaliacao=?
-                            WHERE id=?
-                            """, (
-                                ed_nome, ed_trader, ed_mesa, ed_tamanho, ed_tipo, ed_status,
-                                converter_br_para_float(ed_saldo),
-                                converter_br_para_float(ed_dd),
-                                converter_br_para_float(ed_limite),
-                                converter_br_para_float(ed_meta),
-                                converter_br_para_float(ed_c_mesa),
-                                converter_br_para_float(ed_c_ativ),
-                                converter_br_para_float(ed_c_reset),
-                                converter_br_para_float(ed_c_outros),
-                                str(ed_dt_janela),
-                                ed_prazo,
-                                c_id
-                            ))
-                            conn.commit()
-                            st.toast("Atualizado", icon="✅")
-                            st.success("Dados e prazo da conta atualizados com sucesso!")
+                            supabase.table("contas").update({
+                                "nome": ed_nome, "trader": ed_trader, "mesa": ed_mesa,
+                                "tamanho_conta": ed_tamanho, "tipo": ed_tipo, "status": ed_status,
+                                "saldo_inicial": converter_br_para_float(ed_saldo),
+                                "max_dd": converter_br_para_float(ed_dd),
+                                "limite_diario": converter_br_para_float(ed_limite),
+                                "meta": converter_br_para_float(ed_meta),
+                                "custo_mesa": converter_br_para_float(ed_c_mesa),
+                                "custo_ativacao": converter_br_para_float(ed_c_ativ),
+                                "custo_reset": converter_br_para_float(ed_c_reset),
+                                "outros_custos": converter_br_para_float(ed_c_outros),
+                                "data_inicio_janela": str(ed_dt_janela),
+                                "prazo_avaliacao": ed_prazo
+                            }).eq("id", c_id).execute()
+                            st.toast("Conta atualizada no Supabase!", icon="✅")
                             st.rerun()
                         except Exception as e:
-                            st.toast("Erro, e tente novamente", icon="❌")
-                            st.error(f"Erro ao atualizar a conta: {str(e)}")
+                            st.toast(f"Erro: {str(e)}", icon="❌")
 
             st.markdown("---")
             st.subheader("Zona de Perigo")
-            confirmar_del = st.checkbox(f"⚠️ Confirmo que desejo apagar definitivamente a conta '{c['nome']}' e todos os seus registros.")
+            confirmar_del = st.checkbox(f"⚠️ Confirmo que desejo apagar definitivamente a conta '{c['nome']}' do Supabase.")
             if st.button("🗑️ Excluir Esta Conta Definitivamente"):
                 if confirmar_del:
                     try:
-                        cursor.execute("DELETE FROM saques WHERE conta_id = ?", (c_id,))
-                        cursor.execute("DELETE FROM trades WHERE conta_id = ?", (c_id,))
-                        cursor.execute("DELETE FROM contas WHERE id = ?", (c_id,))
-                        conn.commit()
-                        st.toast("Atualizado", icon="✅")
-                        st.success("Conta removida com sucesso!")
+                        supabase.table("contas").delete().eq("id", c_id).execute()
+                        st.toast("Conta removida do banco na nuvem!", icon="✅")
                         st.rerun()
-                    except Exception:
-                        st.toast("Erro, e tente novamente", icon="❌")
-                        st.error("Erro ao excluir.")
+                    except Exception as e:
+                        st.toast(f"Erro ao excluir: {str(e)}", icon="❌")
                 else:
                     st.warning("Marque a confirmação para prosseguir.")
 
@@ -1185,20 +1110,20 @@ elif menu == "🛡️ Regras e Compliance":
 # =========================================================
 elif menu == "💾 Backup":
     st.title("💾 Backup Geral & Segurança dos Dados")
-    st.caption("Faça o download do backup consolidado de TODAS as suas contas, trades, saques e custos em um único arquivo.")
+    st.caption("Faça o download de cópias locais ou gerencie os dados salvos com segurança no Supabase.")
 
     col_bkg1, col_bkg2 = st.columns(2)
 
     with col_bkg1:
         st.subheader("📥 Exportar Backup Completo")
-        st.write("Gera uma cópia de segurança de todo o sistema (todas as contas juntas).")
+        st.write("Gera uma cópia JSON de segurança de todo o banco do Supabase.")
         
         dados_backup = {
-            "contas": pd.read_sql("SELECT * FROM contas", conn).to_dict(orient="records"),
-            "trades": pd.read_sql("SELECT * FROM trades", conn).to_dict(orient="records"),
-            "saques": pd.read_sql("SELECT * FROM saques", conn).to_dict(orient="records"),
-            "ativos": pd.read_sql("SELECT * FROM ativos", conn).to_dict(orient="records"),
-            "estrategias": pd.read_sql("SELECT * FROM estrategias", conn).to_dict(orient="records")
+            "contas": contas_df.to_dict(orient="records"),
+            "trades": trades_df.to_dict(orient="records"),
+            "saques": saques_df.to_dict(orient="records"),
+            "ativos": ativos_df.to_dict(orient="records"),
+            "estrategias": estrategias_df.to_dict(orient="records")
         }
         backup_json = json.dumps(dados_backup, ensure_ascii=False, indent=2)
 
@@ -1210,74 +1135,65 @@ elif menu == "💾 Backup":
             use_container_width=True,
             type="primary"
         )
-        
-        st.info(f"📊 **Dados inclusos no backup atual:**\n- **{len(dados_backup['contas'])}** conta(s)\n- **{len(dados_backup['trades'])}** trade(s)\n- **{len(dados_backup['saques'])}** saque(s)")
+        st.info(f"📊 **Dados salvos no Supabase:**\n- **{len(contas_df)}** conta(s)\n- **{len(trades_df)}** trade(s)\n- **{len(saques_df)}** saque(s)")
 
     with col_bkg2:
-        st.subheader("📤 Restaurar Backup Completo")
-        st.write("Envie o arquivo `.json` gerado anteriormente para recuperar tudo instantaneamente.")
+        st.subheader("📤 Restaurar Backup (.json)")
+        st.write("Envie um arquivo `.json` gerado anteriormente para preencher o Supabase.")
 
         arquivo_upload = st.file_uploader("Selecione o arquivo de backup (.json)", type=["json"])
         if arquivo_upload is not None:
-            if st.button("Restaurar Todos os Dados Agora", use_container_width=True):
+            if st.button("Restaurar Dados no Supabase Agora", use_container_width=True):
                 try:
                     conteudo = json.load(arquivo_upload)
 
                     if "contas" in conteudo and conteudo["contas"]:
-                        cursor.execute("DELETE FROM contas")
                         for r in conteudo["contas"]:
-                            cols = ", ".join(r.keys())
-                            places = ", ".join(["?"] * len(r))
-                            cursor.execute(f"INSERT INTO contas ({cols}) VALUES ({places})", list(r.values()))
+                            r_clean = {k: v for k, v in r.items() if k != "id"}
+                            supabase.table("contas").insert(r_clean).execute()
 
                     if "trades" in conteudo and conteudo["trades"]:
-                        cursor.execute("DELETE FROM trades")
                         for r in conteudo["trades"]:
-                            cols = ", ".join(r.keys())
-                            places = ", ".join(["?"] * len(r))
-                            cursor.execute(f"INSERT INTO trades ({cols}) VALUES ({places})", list(r.values()))
+                            r_clean = {k: v for k, v in r.items() if k != "id"}
+                            supabase.table("trades").insert(r_clean).execute()
 
                     if "saques" in conteudo and conteudo["saques"]:
-                        cursor.execute("DELETE FROM saques")
                         for r in conteudo["saques"]:
-                            cols = ", ".join(r.keys())
-                            places = ", ".join(["?"] * len(r))
-                            cursor.execute(f"INSERT INTO saques ({cols}) VALUES ({places})", list(r.values()))
+                            r_clean = {k: v for k, v in r.items() if k != "id"}
+                            supabase.table("saques").insert(r_clean).execute()
 
-                    conn.commit()
-                    st.toast("Backup Geral Restaurado com Sucesso!", icon="✅")
-                    st.success("Todos os dados do arquivo foram restaurados perfeitamente!")
+                    st.toast("Backup Restaurado no Supabase!", icon="✅")
+                    st.success("Todos os dados do arquivo foram gravados na nuvem!")
                     st.rerun()
                 except Exception as ex:
                     st.error(f"Erro ao processar arquivo de restauração: {str(ex)}")
 
     st.markdown("---")
-    st.subheader("🧹 Zerar Banco de Dados para Início Oficial")
+    st.subheader("🧹 Zerar Banco de Dados no Supabase")
     st.caption("Use esta opção se quiser apagar todos os testes feitos até agora para começar o cadastro oficial com a primeira conta sendo a Conta #1.")
     
-    chk_reset_total = st.checkbox("⚠️ Confirmo que desejo apagar todas as contas e trades de teste e reiniciar a numeração para 1.")
-    if st.button("Zerar Sistema para Início Oficial"):
+    chk_reset_total = st.checkbox("⚠️ Confirmo que desejo apagar todas as contas, trades e saques no Supabase.")
+    if st.button("Zerar Sistema no Supabase"):
         if chk_reset_total:
             try:
-                cursor.execute("DELETE FROM saques")
-                cursor.execute("DELETE FROM trades")
-                cursor.execute("DELETE FROM contas")
-                cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('contas', 'trades', 'saques')")
-                conn.commit()
-                st.toast("Banco zerado! A próxima conta será a Conta #1.", icon="✅")
-                st.success("Tudo zerado com sucesso! Agora você pode ir em '➕ Cadastrar' e cadastrar sua Conta #1.")
+                # Deletar dados no Supabase
+                supabase.table("trades").delete().neq("id", 0).execute()
+                supabase.table("saques").delete().neq("id", 0).execute()
+                supabase.table("contas").delete().neq("id", 0).execute()
+                st.toast("Supabase zerado com sucesso!", icon="✅")
+                st.success("Tudo limpo! Agora você pode ir em '➕ Cadastrar' e criar sua Conta #1 oficial.")
                 st.rerun()
             except Exception as e_reset:
                 st.error(f"Erro ao zerar banco: {str(e_reset)}")
         else:
-            st.warning("Marque a caixa de confirmação acima para prosseguir com o reset.")
+            st.warning("Marque a caixa de confirmação acima para prosseguir.")
 
 # =========================================================
-# 6. CADASTRAR NOVA CONTA (COM AUTO-PREENCHIMENTO DE SALDO)
+# 6. CADASTRAR NOVA CONTA (NO SUPABASE)
 # =========================================================
 elif menu == "➕ Cadastrar":
     st.title("➕ Cadastrar Nova Conta")
-    st.caption("Cadastre novas contas. O saldo inicial é preenchido proporcionalmente ao tamanho escolhido, e o prazo para aprovação adapta o cálculo da MAM.")
+    st.caption("Cadastre novas contas diretamente no Supabase. O saldo inicial é preenchido proporcionalmente ao tamanho escolhido.")
 
     MAPA_TAMANHO_SALDO = {
         "25k": "25.000,00",
@@ -1380,7 +1296,7 @@ elif menu == "➕ Cadastrar":
         data_inicio = st.date_input("Início das Operações / Janela", value=date.today(), format="DD/MM/YYYY")
 
     st.write("")
-    btn_salvar_conta = st.button("💾 Cadastrar Nova Conta", type="primary", use_container_width=True)
+    btn_salvar_conta = st.button("💾 Cadastrar Nova Conta no Supabase", type="primary", use_container_width=True)
 
     if btn_salvar_conta:
         try:
@@ -1405,16 +1321,14 @@ elif menu == "➕ Cadastrar":
             if not meta_str.strip():
                 raise ValueError("Informe a Meta de Lucro ($).")
 
-            # SISTEMA ANTI-DUPLICAÇÃO DE CONTAS
-            cursor.execute("""
-            SELECT id FROM contas 
-            WHERE LOWER(TRIM(nome)) = ? AND LOWER(TRIM(mesa)) = ?
-            """, (nome.strip().lower(), mesa.strip().lower()))
-            conta_duplicada = cursor.fetchone()
+            # Checagem Anti-Duplicação no Supabase
+            c_dup = supabase.table("contas").select("id").match({
+                "nome": nome.strip(), "mesa": mesa.strip()
+            }).execute()
 
-            if conta_duplicada:
+            if c_dup.data:
                 st.toast("Prevenção anti-duplicação ativada!", icon="⚠️")
-                st.warning(f"⚠️ **Conta Duplicada Prevenida:** A conta **'{nome}'** na mesa **'{mesa}'** já está cadastrada no sistema! Cliques múltiplos foram bloqueados.")
+                st.warning(f"⚠️ **Conta Duplicada Prevenida:** A conta **'{nome}'** na mesa **'{mesa}'** já está cadastrada no Supabase!")
             else:
                 s_ini = converter_br_para_float(saldo_str)
                 m_dd = converter_br_para_float(max_dd_str)
@@ -1426,18 +1340,30 @@ elif menu == "➕ Cadastrar":
                 c_reset = converter_br_para_float(custo_reset_str) if custo_reset_str.strip() else 0.0
                 c_outros = converter_br_para_float(outros_custos_str) if outros_custos_str.strip() else 0.0
 
-                cursor.execute("""
-                INSERT INTO contas (nome, trader, mesa, tamanho_conta, tipo, status, saldo_inicial, max_dd, limite_diario, meta, custo_mesa, custo_ativacao, custo_reset, outros_custos, total_saques, data_inicio_janela, prazo_avaliacao)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?)
-                """, (nome, trader, mesa, tam_final, tipo, status, s_ini, m_dd, l_dia, meta_val, c_mesa, c_ativ, c_reset, c_outros, str(data_inicio), prazo_avaliacao))
-                conn.commit()
+                supabase.table("contas").insert({
+                    "nome": nome.strip(),
+                    "trader": trader.strip(),
+                    "mesa": mesa.strip(),
+                    "tamanho_conta": tam_final,
+                    "tipo": tipo,
+                    "status": status,
+                    "saldo_inicial": s_ini,
+                    "max_dd": m_dd,
+                    "limite_diario": l_dia,
+                    "meta": meta_val,
+                    "custo_mesa": c_mesa,
+                    "custo_ativacao": c_ativ,
+                    "custo_reset": c_reset,
+                    "outros_custos": c_outros,
+                    "total_saques": 0.0,
+                    "data_inicio_janela": str(data_inicio),
+                    "prazo_avaliacao": prazo_avaliacao
+                }).execute()
                 
-                st.toast("Atualizado", icon="✅")
+                st.toast("Conta salva permanentemente no Supabase!", icon="✅")
                 st.success("Conta cadastrada com sucesso!")
                 st.rerun()
         except ValueError as ve:
-            st.toast("Erro, e tente novamente", icon="❌")
-            st.error(f"Atenção: {str(ve)}")
+            st.toast(f"Atenção: {str(ve)}", icon="❌")
         except Exception as e:
-            st.toast("Erro, e tente novamente", icon="❌")
-            st.error(f"Erro ao cadastrar: {str(e)}")
+            st.toast(f"Erro ao cadastrar: {str(e)}", icon="❌")
