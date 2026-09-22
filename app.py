@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import sqlite3
 import calendar
 import json
 import os
@@ -13,27 +12,41 @@ from supabase import create_client, Client
 # Configuração da página
 st.set_page_config(page_title="Gestão de Mesas CME", layout="wide", page_icon="📈")
 
-# --- CONEXÃO INTELIGENTE COM SUPABASE VIA SECRETS ---
+# --- CONEXÃO INTELIGENTE E SANITIZADA COM SUPABASE ---
 try:
-    # Busca com tolerância a maiúsculas/minúsculas
-    sb_url = st.secrets.get("SUPABASE_URL") or st.secrets.get("supabase_url")
-    sb_key = st.secrets.get("SUPABASE_KEY") or st.secrets.get("supabase_key")
+    raw_url = str(st.secrets.get("SUPABASE_URL", "")).strip().strip('"').strip("'")
+    raw_key = str(st.secrets.get("SUPABASE_KEY", "")).strip().strip('"').strip("'")
 
-    # Caso o usuário tenha criado uma seção [supabase]
-    if not sb_url and "supabase" in st.secrets:
-        sb_url = st.secrets["supabase"].get("url") or st.secrets["supabase"].get("SUPABASE_URL") or st.secrets["supabase"].get("supabase_url")
-        sb_key = st.secrets["supabase"].get("key") or st.secrets["supabase"].get("SUPABASE_KEY") or st.secrets["supabase"].get("supabase_key")
+    # Caso esteja dentro de [supabase]
+    if not raw_url and "supabase" in st.secrets:
+        raw_url = str(st.secrets["supabase"].get("url", "")).strip().strip('"').strip("'")
+        raw_key = str(st.secrets["supabase"].get("key", "")).strip().strip('"').strip("'")
 
-    if not sb_url or not sb_key:
-        chaves_encontradas = list(st.secrets.keys()) if hasattr(st.secrets, "keys") else []
-        st.error(f"🚨 Chaves não encontradas! Chaves lidas atualmente no seu Secrets: {chaves_encontradas}")
-        st.info("Certifique-se de salvar exatamente: SUPABASE_URL = \"...\" e SUPABASE_KEY = \"...\" nas configurações de Secrets.")
+    # Fallback seguro para o ID confirmado do seu projeto
+    if "smvgfhdulefoyzmwvugp" in raw_url or not raw_url:
+        sb_url = "https://smvgfhdulefoyzmwvugp.supabase.co"
+    else:
+        # Limpeza automática de URL
+        if "dashboard/project/" in raw_url:
+            ref = raw_url.split("dashboard/project/")[1].split("/")[0]
+            sb_url = f"https://{ref}.supabase.co"
+        else:
+            sb_url = raw_url.split("/rest/v1")[0].rstrip("/")
+            if sb_url.endswith(".supabase.com"):
+                sb_url = sb_url.replace(".supabase.com", ".supabase.co")
+            if not sb_url.startswith("http"):
+                sb_url = f"https://{sb_url}"
+
+    sb_key = raw_key
+
+    if not sb_key or len(sb_key) < 20:
+        st.error("🚨 A chave SUPABASE_KEY não foi encontrada ou está incompleta no Secrets!")
+        st.info("Cole a chave anon (que começa com eyJ...) nas configurações de Secrets do Streamlit.")
         st.stop()
 
-    supabase: Client = create_client(str(sb_url).strip(), str(sb_key).strip())
-except Exception as err_conexao:
-    st.error(f"🚨 Erro na conexão com o Supabase: {str(err_conexao)}")
-    st.info("Dica: Verifique se a URL começa com https:// e se a chave anon não contém quebras de linha ou aspas faltando.")
+    supabase: Client = create_client(sb_url, sb_key)
+except Exception as err_setup:
+    st.error(f"🚨 Erro ao configurar conexão: {str(err_setup)}")
     st.stop()
 
 # --- ESTILIZAÇÃO PARA MENU LATERAL EM QUADRADOS ---
@@ -145,13 +158,19 @@ def parse_display_duracao(val):
     except:
         return s_val
 
-# --- CARREGAR DADOS DO SUPABASE ---
+# --- CARREGAR DADOS DO SUPABASE COM TRATAMENTO BLINDADO ---
 def carregar_dados():
-    contas_res = supabase.table("contas").select("*").order("id", desc=False).execute()
-    trades_res = supabase.table("trades").select("*").order("id", desc=False).execute()
-    saques_res = supabase.table("saques").select("*").order("id", desc=False).execute()
-    ativos_res = supabase.table("ativos").select("nome").order("nome", desc=False).execute()
-    estrategias_res = supabase.table("estrategias").select("nome").order("nome", desc=False).execute()
+    try:
+        contas_res = supabase.table("contas").select("*").order("id", desc=False).execute()
+        trades_res = supabase.table("trades").select("*").order("id", desc=False).execute()
+        saques_res = supabase.table("saques").select("*").order("id", desc=False).execute()
+        ativos_res = supabase.table("ativos").select("nome").order("nome", desc=False).execute()
+        estrategias_res = supabase.table("estrategias").select("nome").order("nome", desc=False).execute()
+    except Exception as err_api:
+        st.error("🚨 **Aviso de Conexão com o Supabase**")
+        st.warning(f"Não foi possível buscar os dados na nuvem no momento. Detalhe técnico: `{str(err_api)}`")
+        st.info(f"Endereço conectado: `{sb_url}`. Verifique sua conexão e se a chave copiada no Secrets é a chave anon completa.")
+        st.stop()
 
     df_c = pd.DataFrame(contas_res.data) if contas_res.data else pd.DataFrame(columns=[
         "id", "nome", "trader", "mesa", "tamanho_conta", "tipo", "status",
@@ -1273,109 +1292,3 @@ elif menu == "➕ Cadastrar":
         status = st.selectbox(
             "Fase / Status da Conta",
             ["Challenge (avaliação)", "Funded (Financiada)", "Live (Real)"],
-            index=None,
-            placeholder="Selecione a Fase..."
-        )
-
-        prazo_avaliacao = st.selectbox(
-            "Regra de Prazo de Aprovação da Mesa",
-            [
-                "Sem prazo máximo (Indeterminado / Ylos)",
-                "30 dias corridos",
-                "60 dias corridos"
-            ],
-            help="Na Ylos, selecione 'Sem prazo máximo'. Em mesas com tempo limite, escolha 30 ou 60 dias para a MAM calcular o ritmo diário correto até o vencimento."
-        )
-
-    with c2:
-        saldo_str = st.text_input(
-            "Saldo Inicial ($)",
-            key="cad_saldo_input",
-            placeholder="0,00 (Preenchido automaticamente ao selecionar o tamanho)"
-        )
-        max_dd_str = st.text_input("Drawdown Máximo Permitido ($)", value="", placeholder="0,00 (ex: 2.500,00)")
-        limite_diario_str = st.text_input("Limite Diário de Perda ($)", value="", placeholder="0,00 (ex: 1.000,00)")
-        meta_str = st.text_input("Meta de Lucro ($)", value="", placeholder="0,00 (ex: 3.000,00)")
-
-        st.markdown("**Custos e Investimento na Conta:**")
-        col_cust1, col_cust2 = st.columns(2)
-        with col_cust1:
-            custo_mesa_str = st.text_input("Valor Pago pela Mesa / Prova ($)", value="", placeholder="0,00")
-            custo_ativ_str = st.text_input("Taxa de Ativação ($)", value="", placeholder="0,00")
-        with col_cust2:
-            custo_reset_str = st.text_input("Custo com Resets ($)", value="", placeholder="0,00")
-            outros_custos_str = st.text_input("Outros Custos ($)", value="", placeholder="0,00")
-
-        data_inicio = st.date_input("Início das Operações / Janela", value=date.today(), format="DD/MM/YYYY")
-
-    st.write("")
-    btn_salvar_conta = st.button("💾 Cadastrar Nova Conta no Supabase", type="primary", use_container_width=True)
-
-    if btn_salvar_conta:
-        try:
-            if not nome.strip():
-                raise ValueError("Preencha a Identificação da Conta.")
-            if not trader.strip():
-                raise ValueError("Preencha o Nome do Trader Responsável.")
-            if not mesa.strip():
-                raise ValueError("Preencha o Nome da Mesa.")
-            if not tam_final:
-                raise ValueError("Selecione ou informe o Tamanho da Conta.")
-            if not tipo:
-                raise ValueError("Selecione o Tipo / Modelo de Conta.")
-            if not status:
-                raise ValueError("Selecione a Fase / Status da Conta.")
-            if not saldo_str.strip():
-                raise ValueError("Informe o Saldo Inicial ($).")
-            if not max_dd_str.strip():
-                raise ValueError("Informe o Drawdown Máximo Permitido ($).")
-            if not limite_diario_str.strip():
-                raise ValueError("Informe o Limite Diário de Perda ($).")
-            if not meta_str.strip():
-                raise ValueError("Informe a Meta de Lucro ($).")
-
-            c_dup = supabase.table("contas").select("id").match({
-                "nome": nome.strip(), "mesa": mesa.strip()
-            }).execute()
-
-            if c_dup.data:
-                st.toast("Prevenção anti-duplicação ativada!", icon="⚠️")
-                st.warning(f"⚠️ **Conta Duplicada Prevenida:** A conta **'{nome}'** na mesa **'{mesa}'** já está cadastrada no Supabase!")
-            else:
-                s_ini = converter_br_para_float(saldo_str)
-                m_dd = converter_br_para_float(max_dd_str)
-                l_dia = converter_br_para_float(limite_diario_str)
-                meta_val = converter_br_para_float(meta_str)
-                
-                c_mesa = converter_br_para_float(custo_mesa_str) if custo_mesa_str.strip() else 0.0
-                c_ativ = converter_br_para_float(custo_ativ_str) if custo_ativ_str.strip() else 0.0
-                c_reset = converter_br_para_float(custo_reset_str) if custo_reset_str.strip() else 0.0
-                c_outros = converter_br_para_float(outros_custos_str) if outros_custos_str.strip() else 0.0
-
-                supabase.table("contas").insert({
-                    "nome": nome.strip(),
-                    "trader": trader.strip(),
-                    "mesa": mesa.strip(),
-                    "tamanho_conta": tam_final,
-                    "tipo": tipo,
-                    "status": status,
-                    "saldo_inicial": s_ini,
-                    "max_dd": m_dd,
-                    "limite_diario": l_dia,
-                    "meta": meta_val,
-                    "custo_mesa": c_mesa,
-                    "custo_ativacao": c_ativ,
-                    "custo_reset": c_reset,
-                    "outros_custos": c_outros,
-                    "total_saques": 0.0,
-                    "data_inicio_janela": str(data_inicio),
-                    "prazo_avaliacao": prazo_avaliacao
-                }).execute()
-                
-                st.toast("Conta salva permanentemente no Supabase!", icon="✅")
-                st.success("Conta cadastrada com sucesso!")
-                st.rerun()
-        except ValueError as ve:
-            st.toast(f"Atenção: {str(ve)}", icon="❌")
-        except Exception as e:
-            st.toast(f"Erro ao cadastrar: {str(e)}", icon="❌")
